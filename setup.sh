@@ -45,6 +45,11 @@ GITHUB_TOKEN=
 DATABASE_URL=postgresql+asyncpg://localhost:5432/patchwork
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3.5:9b
+OLLAMA_CODING_MODEL=qwen3.5:9b
+OLLAMA_REVIEW_MODEL=qwen3.5:9b
+SANDBOX_RUNTIME=process
+SANDBOX_DOCKER_IMAGE=patchwork-sandbox:latest
+GITHUB_WEBHOOK_SECRET=
 EOF
     echo "✓ Created .env with local defaults"
     echo "⚠️  Edit .env if your database or Ollama configuration differs"

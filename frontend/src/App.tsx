@@ -91,6 +91,15 @@ type SandboxReport = {
   modified_files: string[]
 }
 
+type RegressionTestResult = {
+  issue_id: number
+  test_path: string
+  test_content: string
+  explanation: string
+  before_result: SandboxReport
+  fails_before_patch: boolean
+}
+
 type Issue = {
   id: number
   repo: string
@@ -216,6 +225,9 @@ function App() {
   // Sandbox states
   const [issueSandboxState, setIssueSandboxState] = useState<
     Record<number, { loading: boolean; report?: SandboxReport; error?: string }>
+  >({})
+  const [regressionTestState, setRegressionTestState] = useState<
+    Record<number, { loading: boolean; result?: RegressionTestResult; error?: string }>
   >({})
   const [featureSandboxState, setFeatureSandboxState] = useState<
     Record<number, { loading: boolean; report?: SandboxReport; error?: string }>
@@ -524,6 +536,26 @@ function App() {
       setIssueSandboxState((prev) => ({
         ...prev,
         [issue.id]: { loading: false, error: err.message ?? 'Sandbox error' },
+      }))
+    }
+  }
+
+  async function generateRegressionTest(issue: Issue) {
+    setRegressionTestState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
+    try {
+      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/regression-test`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        const err = await res.json()
+        throw new Error(err.detail || 'Regression test generation failed')
+      }
+      const result: RegressionTestResult = await res.json()
+      setRegressionTestState((prev) => ({ ...prev, [issue.id]: { loading: false, result } }))
+    } catch (err: any) {
+      setRegressionTestState((prev) => ({
+        ...prev,
+        [issue.id]: { loading: false, error: err.message ?? 'Regression test error' },
       }))
     }
   }
@@ -2104,6 +2136,49 @@ function App() {
                 )}
 
                 {/* Isolated Test Sandbox Verification Panel */}
+                <div
+                  style={{
+                    padding: '0.75rem 1rem',
+                    background: 'var(--surface-raised, #f7f7f5)',
+                    borderRadius: '8px',
+                    marginBottom: '0.75rem',
+                    fontSize: '0.82rem',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                    <span>
+                      <strong>Regression proof</strong>
+                      <br />
+                      <span style={{ opacity: 0.7 }}>
+                        Generate a focused test and verify it fails before the fix.
+                      </span>
+                    </span>
+                    <button
+                      className="button button-quiet"
+                      type="button"
+                      disabled={regressionTestState[selectedIssue!.id]?.loading}
+                      onClick={() => generateRegressionTest(selectedIssue!)}
+                    >
+                      {regressionTestState[selectedIssue!.id]?.loading ? (
+                        <><Loader size={14} className="spin" /> Generating</>
+                      ) : (
+                        <><FlaskConical size={14} /> Generate test</>
+                      )}
+                    </button>
+                  </div>
+                  {regressionTestState[selectedIssue!.id]?.result && (
+                    <div style={{ marginTop: '0.6rem', color: regressionTestState[selectedIssue!.id]!.result!.fails_before_patch ? '#287a4d' : '#a15c00' }}>
+                      {regressionTestState[selectedIssue!.id]!.result!.fails_before_patch
+                        ? `Confirmed failing before patch: ${regressionTestState[selectedIssue!.id]!.result!.test_path}`
+                        : `The generated test did not fail before patching: ${regressionTestState[selectedIssue!.id]!.result!.test_path}`}
+                    </div>
+                  )}
+                  {regressionTestState[selectedIssue!.id]?.error && (
+                    <div style={{ marginTop: '0.6rem', color: '#c0392b' }}>
+                      {regressionTestState[selectedIssue!.id]!.error}
+                    </div>
+                  )}
+                </div>
                 <SandboxPanel
                   repoFullName={selectedFeature.repository}
                   title={selectedFeature.title}

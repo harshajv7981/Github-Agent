@@ -20,6 +20,7 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 from github import Github, GithubException
 from ollama import AsyncClient
+from app.model_router import model_for
 
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -227,7 +228,7 @@ async def generate_acceptance_criteria(
     """).strip()
 
     resp = await client.generate(
-        model=OLLAMA_MODEL,
+        model=model_for("triage"),
         prompt=prompt,
         think=False,
         options={"temperature": 0.1, "num_predict": 1024},
@@ -296,7 +297,7 @@ async def analyze_issue(
     """).strip()
 
     selection_resp = await client.generate(
-        model=OLLAMA_MODEL,
+        model=model_for("triage"),
         prompt=file_selection_prompt,
         think=False,
         options={"temperature": 0.1, "num_predict": 512},
@@ -361,7 +362,7 @@ async def analyze_issue(
     """).strip()
 
     fix_resp = await client.generate(
-        model=OLLAMA_MODEL,
+        model=model_for("coding"),
         prompt=fix_prompt,
         think=False,
         system="You are an expert open-source maintainer. Provide exact code rewrites in the requested === FILE: ... === format followed by the ANALYSIS and PR TITLE sections. Do not include thinking tokens.",
@@ -405,6 +406,64 @@ async def analyze_issue(
         "pr_title": pr_title,
         "pr_body": pr_body,
         "relevant_files": list(file_contents.keys()),
+    }
+
+
+async def generate_regression_test(
+    repo_full_name: str,
+    issue_number: int,
+    issue_title: str,
+    issue_body: str,
+) -> dict:
+    """Generate one focused regression test and return it for pre-patch validation."""
+    client = AsyncClient(host=OLLAMA_HOST)
+    local = await asyncio.to_thread(_clone_or_update, repo_full_name)
+    file_tree = await asyncio.to_thread(_repo_file_tree, local)
+
+    prompt = textwrap.dedent(f"""
+        You are writing a minimal regression test for a GitHub issue.
+
+        Repository: {repo_full_name}
+        Issue #{issue_number}: {issue_title}
+        Description: {(issue_body or '(no description)')[:1800]}
+
+        Python source files:
+        {file_tree}
+
+        Write exactly one focused pytest test that expresses the missing behavior.
+        The test must fail against the current repository if the issue is real and
+        pass after a correct implementation. Do not test unrelated behavior.
+        Use only the repository's existing public APIs and standard pytest features.
+        Return ONLY JSON in this format:
+        {{
+          "test_path": "tests/test_patchwork_regression.py",
+          "test_content": "complete Python file content",
+          "explanation": "what behavior this test proves"
+        }}
+    """).strip()
+
+    response = await client.generate(
+        model=model_for("review"),
+        prompt=prompt,
+        think=False,
+        options={"temperature": 0.1, "num_predict": 3072},
+    )
+    data = _extract_json_block(response.response)
+    if not isinstance(data, dict):
+        raise ValueError("Ollama did not return a regression test object")
+
+    test_path = str(data.get("test_path", "tests/test_patchwork_regression.py")).strip()
+    test_content = str(data.get("test_content", ""))
+    safe_path = _safe_repo_path(local, test_path)
+    if safe_path is None or not test_path.startswith("tests/") or not test_path.endswith(".py"):
+        raise ValueError("Generated regression test must be a Python file under tests/")
+    if not test_content.strip():
+        raise ValueError("Generated regression test is empty")
+
+    return {
+        "test_path": test_path,
+        "test_content": test_content,
+        "explanation": str(data.get("explanation", "Regression test for the reported issue.")),
     }
 
 
@@ -474,7 +533,7 @@ async def review_patch(
     """).strip()
 
     resp = await client.generate(
-        model=OLLAMA_MODEL,
+        model=model_for("coding"),
         prompt=prompt,
         think=False,
         options={"temperature": 0.1, "num_predict": 2048},
@@ -669,7 +728,7 @@ async def suggest_features_for_repo(
     """).strip()
 
     resp = await client.generate(
-        model=OLLAMA_MODEL,
+        model=model_for("triage"),
         prompt=prompt,
         think=False,
         system="You are an open-source technical architect. Respond ONLY with a valid JSON object containing the 'suggestions' list. Do not include thinking or preamble.",
@@ -731,7 +790,7 @@ async def implement_feature(
         """).strip()
 
         sel_resp = await client.generate(
-            model=OLLAMA_MODEL,
+            model=model_for("triage"),
             prompt=selection_prompt,
             think=False,
             options={"temperature": 0.1, "num_predict": 512},
@@ -789,7 +848,7 @@ async def implement_feature(
     """).strip()
 
     impl_resp = await client.generate(
-        model=OLLAMA_MODEL,
+        model=model_for("coding"),
         prompt=impl_prompt,
         think=False,
         system="You are an expert open-source maintainer implementing a feature. Output full file rewrites in === FILE: ... === format, followed by ANALYSIS and PR TITLE. Do not include thinking tokens.",

@@ -439,3 +439,37 @@ class GitHubService:
                 "policy_check": policy_check,
             },
         }
+
+    def get_pull_request_checks(self, repo_full_name: str, pr_number: int) -> dict:
+        """Return normalized check-run status for the latest commit on a pull request."""
+        repo = self.client.get_repo(repo_full_name)
+        pull_request = repo.get_pull(pr_number)
+        commit = repo.get_commit(pull_request.head.sha)
+        combined_status = commit.get_combined_status()
+        checks = []
+
+        for check in commit.get_check_runs():
+            checks.append({
+                "name": check.name,
+                "status": check.status,
+                "conclusion": check.conclusion,
+                "details_url": check.details_url,
+            })
+
+        failed = [
+            check for check in checks
+            if check["conclusion"] in {"failure", "cancelled", "timed_out", "action_required"}
+        ]
+        return {
+            "repository": repo_full_name,
+            "pull_request_number": pr_number,
+            "commit_sha": pull_request.head.sha,
+            "state": combined_status.state,
+            "total_checks": len(checks),
+            "passed_checks": sum(1 for check in checks if check["conclusion"] == "success"),
+            "failed_checks": len(failed),
+            "checks": checks,
+            "ready_for_review": bool(checks) and not failed and all(
+                check["status"] == "completed" for check in checks
+            ),
+        }

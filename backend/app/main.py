@@ -1,5 +1,8 @@
 import os
 import json
+import asyncio
+import hashlib
+import hmac
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, Optional
@@ -8,7 +11,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
-from fastapi import FastAPI, Depends, Query, HTTPException
+from fastapi import FastAPI, Depends, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from ollama import AsyncClient
 from pydantic import BaseModel
@@ -22,12 +25,15 @@ from app.models import (
     Run as RunModel,
     PullRequest as PRModel,
     FeatureSuggestion as FeatureModel,
+    AgentEvent,
+    RepositoryMemory,
 )
 from app.scheduler import get_scheduler
 
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
 
 @asynccontextmanager
@@ -155,6 +161,57 @@ class PullRequestResponse(BaseModel):
     created_at: str
 
 
+class CIStatusResponse(BaseModel):
+    repository: str
+    pull_request_number: int
+    commit_sha: str
+    state: Optional[str]
+    total_checks: int
+    passed_checks: int
+    failed_checks: int
+    checks: list[dict]
+    ready_for_review: bool
+
+
+class RepositoryIntelligenceResponse(BaseModel):
+    repository: str
+    files_scanned: int
+    symbol_count: int
+    test_file_count: int
+    modules: list[dict]
+    symbols: list[dict]
+    imports: list[dict]
+    dependency_edges: list[dict]
+    test_files: list[str]
+
+
+class AcceptanceScoreResponse(BaseModel):
+    issue_id: int
+    repository: str
+    issue_number: int
+    score: int
+    recommendation: str
+    reasons: list[str]
+    checked_at: str
+
+
+class AgentEventResponse(BaseModel):
+    id: int
+    event_type: str
+    payload: dict
+    created_at: str
+
+
+class RepositoryMemoryRequest(BaseModel):
+    memory: str
+
+
+class RepositoryMemoryResponse(BaseModel):
+    repository: str
+    memory: str
+    updated_at: str
+
+
 class CreatePRRequest(BaseModel):
     pr_title: str
     pr_body: str
@@ -193,6 +250,7 @@ class ImplementFeatureResponse(BaseModel):
 class SandboxVerifyRequest(BaseModel):
     repo_full_name: str
     file_rewrites: dict[str, str]
+    runtime: Optional[Literal["process", "docker"]] = None
 
 
 class SandboxVerifyResponse(BaseModel):
@@ -204,6 +262,15 @@ class SandboxVerifyResponse(BaseModel):
     checks: dict
     summary: str
     modified_files: list[str]
+
+
+class RegressionTestResponse(BaseModel):
+    issue_id: int
+    test_path: str
+    test_content: str
+    explanation: str
+    before_result: SandboxVerifyResponse
+    fails_before_patch: bool
 
 
 class AutoHealRequest(BaseModel):
@@ -316,6 +383,36 @@ async def health() -> HealthResponse:
     )
 
 
+@app.post("/api/webhooks/github")
+async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+    """Accept signed GitHub events for future issue, review, and CI automations."""
+    if not GITHUB_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="GITHUB_WEBHOOK_SECRET is not configured")
+
+    body = await request.body()
+    signature = request.headers.get("x-hub-signature-256", "")
+    expected = "sha256=" + hmac.new(
+        GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    payload = json.loads(body)
+    event_name = request.headers.get("x-github-event", "unknown")
+    repository = payload.get("repository", {}).get("full_name")
+    db.add(AgentEvent(
+        repository=repository,
+        event_type=f"github_webhook:{event_name}",
+        payload=json.dumps({
+            "action": payload.get("action"),
+            "sender": payload.get("sender", {}).get("login"),
+            "repository": repository,
+        }),
+    ))
+    await db.commit()
+    return {"status": "accepted", "event": event_name}
+
+
 @app.get("/api/repositories", response_model=list[RepositoryResponse])
 async def list_repositories(
     language: Optional[str] = Query(None),
@@ -347,6 +444,18 @@ async def list_repositories(
         )
         for repo in repos
     ]
+
+
+@app.get("/api/repositories/{repo_full_name:path}/intelligence", response_model=RepositoryIntelligenceResponse)
+async def repository_intelligence(repo_full_name: str) -> RepositoryIntelligenceResponse:
+    """Build an AST-backed repository briefing for agent context and review."""
+    from app.intelligence_service import build_repository_graph
+
+    try:
+        graph = await build_repository_graph(repo_full_name)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Repository analysis failed: {exc}") from exc
+    return RepositoryIntelligenceResponse(repository=repo_full_name, **graph)
 
 
 @app.get("/api/issues", response_model=list[CandidateIssueResponse])
@@ -387,6 +496,45 @@ async def list_issues(
         )
         for issue in issues
     ]
+
+
+@app.get("/api/issues/{issue_id}/acceptance-score", response_model=AcceptanceScoreResponse)
+async def issue_acceptance_score(
+    issue_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> AcceptanceScoreResponse:
+    """Estimate whether a maintainer is likely to welcome work on an issue."""
+    issue = await db.get(IssueModel, issue_id)
+    if not issue:
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    from app.contribution_service import score_issue_acceptance
+    from app.github_service import GitHubService
+
+    try:
+        preflight = await asyncio.to_thread(
+            GitHubService().run_pr_preflight,
+            issue.repository,
+            f"patchwork/fix-issue-{issue.number}",
+            issue.number,
+        )
+        result = score_issue_acceptance(
+            {
+                "difficulty": issue.difficulty,
+                "label": issue.label,
+                "body": issue.body,
+            },
+            preflight,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Acceptance scoring failed: {exc}") from exc
+
+    return AcceptanceScoreResponse(
+        issue_id=issue.id,
+        repository=issue.repository,
+        issue_number=issue.number,
+        **result,
+    )
 
 
 @app.get("/api/runs", response_model=list[RunResponse])
@@ -438,6 +586,12 @@ async def analyze_issue(
         raise HTTPException(status_code=404, detail="Issue not found")
 
     issue.agent_status = "analyzing"
+    db.add(AgentEvent(
+        issue_id=issue.id,
+        repository=issue.repository,
+        event_type="issue_analysis_started",
+        payload=json.dumps({"issue_number": issue.number}),
+    ))
     await db.commit()
 
     from app.agent_service import analyze_issue as _analyze
@@ -457,6 +611,12 @@ async def analyze_issue(
 
     issue.ai_analysis = result["analysis"]
     issue.agent_status = "analyzed"
+    db.add(AgentEvent(
+        issue_id=issue.id,
+        repository=issue.repository,
+        event_type="issue_analysis_completed",
+        payload=json.dumps({"files": result["relevant_files"]}),
+    ))
     await db.commit()
 
     return AnalyzeIssueResponse(
@@ -491,6 +651,111 @@ async def api_review_patch(
     )
     
     return review_data
+
+
+@app.post("/api/issues/{issue_id}/regression-test", response_model=RegressionTestResponse)
+async def generate_issue_regression_test(
+    issue_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> RegressionTestResponse:
+    """Generate and run a focused regression test against the unmodified repository."""
+    issue = await db.get(IssueModel, issue_id)
+    if not issue:
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    from app.agent_service import generate_regression_test
+    from app.sandbox_service import run_sandbox_validation
+
+    try:
+        generated = await generate_regression_test(
+            repo_full_name=issue.repository,
+            issue_number=issue.number,
+            issue_title=issue.title,
+            issue_body=issue.body or "",
+        )
+        before_result = await run_sandbox_validation(
+            repo_full_name=issue.repository,
+            file_rewrites={generated["test_path"]: generated["test_content"]},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Regression test generation failed: {exc}") from exc
+
+    return RegressionTestResponse(
+        issue_id=issue_id,
+        test_path=generated["test_path"],
+        test_content=generated["test_content"],
+        explanation=generated["explanation"],
+        before_result=SandboxVerifyResponse(**before_result),
+        fails_before_patch=(
+            not before_result["success"]
+            and before_result["checks"]["tests"]["failed_count"] > 0
+        ),
+    )
+
+
+@app.get("/api/issues/{issue_id}/trajectory", response_model=list[AgentEventResponse])
+async def issue_trajectory(
+    issue_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentEventResponse]:
+    """Return persisted agent events for a contribution attempt."""
+    result = await db.execute(
+        select(AgentEvent)
+        .where(AgentEvent.issue_id == issue_id)
+        .order_by(AgentEvent.created_at)
+    )
+    events = result.scalars().all()
+    return [
+        AgentEventResponse(
+            id=event.id,
+            event_type=event.event_type,
+            payload=json.loads(event.payload) if event.payload else {},
+            created_at=_format_datetime(event.created_at),
+        )
+        for event in events
+    ]
+
+
+@app.get("/api/repositories/{repo_full_name:path}/memory", response_model=RepositoryMemoryResponse)
+async def get_repository_memory(
+    repo_full_name: str,
+    db: AsyncSession = Depends(get_db),
+) -> RepositoryMemoryResponse:
+    record = (
+        await db.execute(
+            select(RepositoryMemory).where(RepositoryMemory.repository == repo_full_name)
+        )
+    ).scalar_one_or_none()
+    return RepositoryMemoryResponse(
+        repository=repo_full_name,
+        memory=record.memory if record else "",
+        updated_at=_format_datetime(record.updated_at) if record else "never",
+    )
+
+
+@app.put("/api/repositories/{repo_full_name:path}/memory", response_model=RepositoryMemoryResponse)
+async def update_repository_memory(
+    repo_full_name: str,
+    body: RepositoryMemoryRequest,
+    db: AsyncSession = Depends(get_db),
+) -> RepositoryMemoryResponse:
+    record = (
+        await db.execute(
+            select(RepositoryMemory).where(RepositoryMemory.repository == repo_full_name)
+        )
+    ).scalar_one_or_none()
+    if record:
+        record.memory = body.memory
+    else:
+        record = RepositoryMemory(repository=repo_full_name, memory=body.memory)
+        db.add(record)
+    await db.commit()
+    await db.refresh(record)
+    return RepositoryMemoryResponse(
+        repository=repo_full_name,
+        memory=record.memory,
+        updated_at=_format_datetime(record.updated_at),
+    )
 
 @app.post("/api/issues/{issue_id}/create-pr", response_model=PullRequestResponse)
 async def create_pr_for_issue(
@@ -597,6 +862,30 @@ async def list_pull_requests(
         )
         for pr in prs
     ]
+
+
+@app.get("/api/pull-requests/{pull_request_id}/ci-status", response_model=CIStatusResponse)
+async def pull_request_ci_status(
+    pull_request_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> CIStatusResponse:
+    """Read the latest GitHub Actions/check-run state for a tracked pull request."""
+    record = await db.get(PRModel, pull_request_id)
+    if not record or not record.number:
+        raise HTTPException(status_code=404, detail="Pull request or GitHub number not found")
+
+    from app.github_service import GitHubService
+
+    try:
+        checks = await asyncio.to_thread(
+            GitHubService().get_pull_request_checks,
+            record.repository,
+            record.number,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Unable to read GitHub checks: {exc}") from exc
+
+    return CIStatusResponse(**checks)
 
 
 @app.get("/api/features", response_model=list[FeatureSuggestionResponse])
@@ -858,6 +1147,7 @@ async def run_sandbox_endpoint(body: SandboxVerifyRequest) -> SandboxVerifyRespo
         result = await run_sandbox_validation(
             repo_full_name=body.repo_full_name,
             file_rewrites=body.file_rewrites,
+            runtime=body.runtime,
         )
         return SandboxVerifyResponse(**result)
     except Exception as e:
@@ -881,6 +1171,7 @@ async def verify_issue_patch(
         result = await run_sandbox_validation(
             repo_full_name=issue.repository,
             file_rewrites=body.file_rewrites,
+            runtime=body.runtime,
         )
         issue.sandbox_result = json.dumps(result)
         await db.commit()
@@ -906,6 +1197,7 @@ async def verify_feature_code(
         result = await run_sandbox_validation(
             repo_full_name=feature.repository,
             file_rewrites=body.file_rewrites,
+            runtime=body.runtime,
         )
         feature.sandbox_result = json.dumps(result)
         await db.commit()

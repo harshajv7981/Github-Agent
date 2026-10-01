@@ -21,12 +21,15 @@ from typing import Any
 
 from dotenv import load_dotenv
 from ollama import AsyncClient
+from app.model_router import model_for
 
 load_dotenv()
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 REPOS_CACHE_DIR = Path.home() / ".patchwork" / "repos"
+SANDBOX_RUNTIME = os.getenv("SANDBOX_RUNTIME", "process").lower()
+SANDBOX_DOCKER_IMAGE = os.getenv("SANDBOX_DOCKER_IMAGE", "patchwork-sandbox:latest")
 
 # Python executable from virtual environment
 VENV_PYTHON = sys.executable
@@ -94,19 +97,47 @@ def _run_cmd(
     cwd: Path,
     timeout: int = 30,
     env_extra: dict[str, str] | None = None,
+    runtime: str | None = None,
 ) -> tuple[int, str, str, float]:
     """Execute command with timeout and return (exit_code, stdout, stderr, duration)."""
+    runtime = (runtime or SANDBOX_RUNTIME).lower()
     env = _make_sandbox_env(cwd, env_extra)
 
+    if runtime not in {"process", "docker"}:
+        return 1, "", f"Unsupported sandbox runtime: {runtime}", 0.0
+
+    if runtime == "docker":
+        executable = "python" if Path(cmd[0]).name.startswith("python") else cmd[0]
+        cmd = [executable, *cmd[1:]]
+        full_cmd = [
+            "docker", "run", "--rm",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt", "no-new-privileges",
+            "--pids-limit", "128",
+            "--memory", f"{MAX_SANDBOX_MEMORY_MB}m",
+            "--cpus", "1",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "-v", f"{cwd.resolve()}:/workspace:rw",
+            "-w", "/workspace",
+            "-e", "PYTHONPATH=/workspace",
+            "-e", "PYTHONDONTWRITEBYTECODE=1",
+            SANDBOX_DOCKER_IMAGE,
+            *cmd,
+        ]
+    else:
+        full_cmd = cmd
+
     resource_prefix: list[str] = []
-    if sys.platform != "win32" and shutil.which("ulimit") is not None:
+    if runtime == "process" and sys.platform != "win32" and shutil.which("ulimit") is not None:
         pass
-    if sys.platform == "darwin" or sys.platform.startswith("linux"):
+    if runtime == "process" and (sys.platform == "darwin" or sys.platform.startswith("linux")):
         mem_kb = MAX_SANDBOX_MEMORY_MB * 1024
         resource_prefix = ["bash", "-c",
             f"ulimit -v {mem_kb} 2>/dev/null; exec \"$@\"", "--"] if shutil.which("bash") else []
 
-    full_cmd = resource_prefix + cmd if resource_prefix else cmd
+    full_cmd = resource_prefix + full_cmd if resource_prefix else full_cmd
 
     t0 = time.time()
     try:
@@ -130,7 +161,7 @@ def _run_cmd(
         return 1, "", str(e), duration
 
 
-def _check_syntax(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]:
+def _check_syntax(sandbox_dir: Path, target_files: list[str], runtime: str) -> dict[str, Any]:
     """Compile changed python files with py_compile to detect syntax errors."""
     errors = []
     checked = []
@@ -147,6 +178,7 @@ def _check_syntax(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]:
             [VENV_PYTHON, "-m", "py_compile", str(file_path)],
             cwd=sandbox_dir,
             timeout=10,
+            runtime=runtime,
         )
         if code != 0:
             errors.append({
@@ -163,7 +195,7 @@ def _check_syntax(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]:
     }
 
 
-def _check_linters(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]:
+def _check_linters(sandbox_dir: Path, target_files: list[str], runtime: str) -> dict[str, Any]:
     """Run flake8 and ruff on modified files."""
     py_files = [f for f in target_files if f.endswith(".py") and (sandbox_dir / f).exists()]
     if not py_files:
@@ -183,7 +215,7 @@ def _check_linters(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]
         "--ignore=E501,W503,E203",
         *py_files
     ]
-    code, out, err, _ = _run_cmd(cmd, cwd=sandbox_dir, timeout=15)
+    code, out, err, _ = _run_cmd(cmd, cwd=sandbox_dir, timeout=15, runtime=runtime)
 
     if out.strip():
         for line in out.strip().split("\n"):
@@ -217,7 +249,7 @@ def _check_linters(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]
     }
 
 
-def _check_types(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]:
+def _check_types(sandbox_dir: Path, target_files: list[str], runtime: str) -> dict[str, Any]:
     """Run mypy on modified files."""
     py_files = [f for f in target_files if f.endswith(".py") and (sandbox_dir / f).exists()]
     if not py_files:
@@ -235,7 +267,7 @@ def _check_types(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]:
         "--hide-error-codes",
         *py_files
     ]
-    code, out, err, _ = _run_cmd(cmd, cwd=sandbox_dir, timeout=20)
+    code, out, err, _ = _run_cmd(cmd, cwd=sandbox_dir, timeout=20, runtime=runtime)
 
     type_errors = []
     if out.strip():
@@ -254,7 +286,12 @@ def _check_types(sandbox_dir: Path, target_files: list[str]) -> dict[str, Any]:
     }
 
 
-def _run_pytest_suite(sandbox_dir: Path, target_files: list[str], timeout: int = 30) -> dict[str, Any]:
+def _run_pytest_suite(
+    sandbox_dir: Path,
+    target_files: list[str],
+    timeout: int = 30,
+    runtime: str = SANDBOX_RUNTIME,
+) -> dict[str, Any]:
     """Run pytest suite in the sandbox directory."""
     test_dirs = [d for d in ["tests", "test", "testing"] if (sandbox_dir / d).is_dir()]
 
@@ -278,7 +315,7 @@ def _run_pytest_suite(sandbox_dir: Path, target_files: list[str], timeout: int =
         # Fallback to current directory discovery
         cmd.append(".")
 
-    code, out, err, duration = _run_cmd(cmd, cwd=sandbox_dir, timeout=timeout)
+    code, out, err, duration = _run_cmd(cmd, cwd=sandbox_dir, timeout=timeout, runtime=runtime)
     combined_output = (out + "\n" + err).strip()
 
     # Parse pytest summary line (e.g. "3 passed, 1 failed in 0.45s" or "1 passed in 0.12s")
@@ -330,11 +367,16 @@ async def run_sandbox_validation(
     repo_full_name: str,
     file_rewrites: dict[str, str],
     timeout_seconds: int = 45,
+    runtime: str | None = None,
 ) -> dict[str, Any]:
     """
     Copy repo into an isolated temp directory, apply file rewrites,
     and execute syntax checks, linters, type checks, and pytest suite.
     """
+    runtime = (runtime or SANDBOX_RUNTIME).lower()
+    if runtime not in {"process", "docker"}:
+        raise ValueError(f"Unsupported sandbox runtime: {runtime}")
+
     # 1. Fetch repo
     local_repo = await asyncio.to_thread(_clone_or_get_repo, repo_full_name)
 
@@ -365,10 +407,12 @@ async def run_sandbox_validation(
         target_files = list(file_rewrites.keys())
 
         # 4. Run Check Suite in threadpool
-        syntax_res = await asyncio.to_thread(_check_syntax, temp_dir, target_files)
-        lint_res = await asyncio.to_thread(_check_linters, temp_dir, target_files)
-        type_res = await asyncio.to_thread(_check_types, temp_dir, target_files)
-        test_res = await asyncio.to_thread(_run_pytest_suite, temp_dir, target_files, timeout=timeout_seconds)
+        syntax_res = await asyncio.to_thread(_check_syntax, temp_dir, target_files, runtime)
+        lint_res = await asyncio.to_thread(_check_linters, temp_dir, target_files, runtime)
+        type_res = await asyncio.to_thread(_check_types, temp_dir, target_files, runtime)
+        test_res = await asyncio.to_thread(
+            _run_pytest_suite, temp_dir, target_files, timeout_seconds, runtime
+        )
 
         total_duration = round(time.time() - t_start, 2)
 
@@ -391,7 +435,7 @@ async def run_sandbox_validation(
             "overall_status": overall_status,
             "score": score,
             "execution_time_seconds": total_duration,
-            "environment": "isolated_process_sandbox",
+            "environment": f"{runtime}_sandbox",
             "checks": {
                 "syntax": syntax_res,
                 "linter": lint_res,
@@ -506,7 +550,7 @@ async def auto_heal_code(
     """).strip()
 
     resp = await client.generate(
-        model=OLLAMA_MODEL,
+        model=model_for("coding"),
         prompt=heal_prompt,
         think=False,
         system="You are an expert code debugger. Output corrected files in === FILE: ... === format, followed by ANALYSIS.",

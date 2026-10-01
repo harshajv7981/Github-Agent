@@ -112,3 +112,25 @@ class FeatureSuggestion(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+
+class AgentEvent(Base):
+    __tablename__ = "agent_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    issue_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
+    repository: Mapped[str] = mapped_column(String(255), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(80))
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class RepositoryMemory(Base):
+    __tablename__ = "repository_memory"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repository: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    memory: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )

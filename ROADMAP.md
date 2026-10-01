@@ -51,3 +51,50 @@ A feedback loop that learns from Patchwork's own history of accepted, rejected, 
 
 ### 6. Regression Test Generator
 Generate targeted tests for the specific behavior being changed. Especially critical when contributing to legacy repositories with limited pre-existing code coverage around the affected area.
+
+## Implementation Plan
+
+Patchwork will implement these capabilities around one durable contribution run:
+
+```text
+Issue or webhook
+  -> repository briefing and acceptance score
+  -> repository graph and impact analysis
+  -> regression test generation
+  -> patch generation
+  -> container or local sandbox verification
+  -> independent diff review
+  -> optional human approval
+  -> PR creation
+  -> CI monitoring and repair proposal
+  -> maintainer outcome and contribution memory
+```
+
+### Phase 1: Trust and correctness
+
+1. Add a regression-test-first workflow that proves a generated test fails before the patch and passes after it.
+2. Add a pluggable sandbox runtime with Docker as the production backend and the current process runner as development-only.
+3. Require sandbox success, diff review approval, and explicit human approval before PR creation.
+4. Persist agent events, commands, diagnostics, patch attempts, and validation results for replay.
+
+### Phase 2: Contribution intelligence
+
+1. Build a repository briefing from AST symbols, imports, tests, commits, guidelines, and ownership signals.
+2. Score maintainer acceptance likelihood using repository policy, issue activity, similar PRs, and historical outcomes.
+3. Store repository-specific contribution memory and include it in future prompts.
+4. Add historical issue and PR similarity search to avoid duplicate or unwelcome work.
+
+### Phase 3: Closed-loop automation
+
+1. Monitor GitHub Actions checks after PR creation and normalize failures into sandbox diagnostics.
+2. Propose follow-up commits for CI failures and requested review changes; never push automatically without approval.
+3. Add GitHub webhook handlers for new issues, labels, review requests, CI failures, and merged or closed PRs.
+4. Add model routing, cost budgets, retries, and per-task model performance metrics.
+
+### Phase 4: Evaluation and scale
+
+1. Add a benchmark harness using frozen repository snapshots and historical issues.
+2. Track patch success, first-pass success, merge rate, time-to-merge, human review time, and cost per accepted contribution.
+3. Add parallel workers, distributed scheduling, notifications, and team permissions only after the single-worker workflow is reliable.
+
+The product differentiator is contribution acceptance quality, not generic code generation: Patchwork should optimize for small, tested, policy-compliant changes that maintainers are likely to merge.

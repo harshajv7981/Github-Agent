@@ -174,8 +174,9 @@ def _check_syntax(sandbox_dir: Path, target_files: list[str], runtime: str) -> d
             continue
 
         checked.append(rel_path)
+        compile_path = rel_path if runtime == "docker" else str(file_path)
         code, out, err, _ = _run_cmd(
-            [VENV_PYTHON, "-m", "py_compile", str(file_path)],
+            [VENV_PYTHON, "-m", "py_compile", compile_path],
             cwd=sandbox_dir,
             timeout=10,
             runtime=runtime,

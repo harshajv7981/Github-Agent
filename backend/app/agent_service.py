@@ -632,8 +632,27 @@ async def create_pull_request(
 def _get_or_create_fork(user, upstream):
     try:
         return user.get_repo(upstream.name)
-    except GithubException:
+    except GithubException as error:
+        if error.status != 404:
+            raise RuntimeError(
+                "GitHub authenticated successfully, but this token cannot access "
+                f"the fork account or repository ({error.status}). Use a classic "
+                "PAT with the repo scope, or authorize a fine-grained token for "
+                "the upstream repository and fork creation, then retry."
+            ) from error
+
+    try:
         return user.create_fork(upstream)
+    except GithubException as error:
+        if error.status == 403:
+            raise RuntimeError(
+                "GitHub rejected fork creation (403). The PAT needs permission "
+                "to create forks. For a classic PAT, enable the repo scope; for "
+                "a fine-grained PAT, authorize the repository and use a token "
+                "that supports fork creation. You can also create the fork "
+                f"manually at https://github.com/{upstream.full_name}/fork."
+            ) from error
+        raise RuntimeError(f"GitHub could not create the fork: {error}") from error
 
 
 def _open_github_pr(upstream, fork, branch, base_branch, pr_title, pr_body):

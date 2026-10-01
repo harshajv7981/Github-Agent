@@ -162,7 +162,7 @@ Github-Agent/
 - **Node.js 20+**
 - **PostgreSQL** running locally
 - **Ollama** running locally with `qwen3.5:9b` or `qwen2.5-coder:7b`
-- **GitHub Personal Access Token** (with `repo` scope for PR creation)
+- **GitHub Personal Access Token** (a classic PAT with `repo` scope is the most compatible option for fork-based PR creation; fine-grained PATs may authenticate successfully but still be unable to create forks)
 
 ### 1. Configure Environment Variables
 Create a `.env` file in the project root:
@@ -178,6 +178,8 @@ SANDBOX_RUNTIME=process
 SANDBOX_DOCKER_IMAGE=patchwork-sandbox:latest
 GITHUB_WEBHOOK_SECRET=replace_with_a_random_secret
 ```
+
+If PR creation reports `403 Resource not accessible by personal access token` while creating a fork, create the fork manually from the target repository's GitHub **Fork** button and retry. Patchwork will reuse an existing fork. Otherwise replace the token with a classic PAT that has the `repo` scope and authorize it for the target repository.
 
 ### 2. Start Ollama
 Ensure your local Ollama instance is active and has the required model:

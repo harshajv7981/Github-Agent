@@ -11,11 +11,9 @@ import os
 import re
 import asyncio
 import subprocess
-import tempfile
 import textwrap
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
@@ -75,13 +73,29 @@ def _repo_file_tree(local: Path, max_files: int = 200) -> str:
 
 
 def _read_file(local: Path, rel_path: str) -> str:
-    full = local / rel_path.strip()
+    full = _safe_repo_path(local, rel_path)
+    if full is None:
+        return ""
     if not full.exists():
         return ""
     text = full.read_text(errors="replace")
     if len(text) > MAX_FILE_CHARS:
         text = text[:MAX_FILE_CHARS] + f"\n\n[...truncated at {MAX_FILE_CHARS} chars]"
     return text
+
+
+def _safe_repo_path(root: Path, rel_path: str) -> Path | None:
+    candidate = Path(rel_path.strip())
+    if candidate.is_absolute():
+        return None
+
+    root_resolved = root.resolve()
+    path_resolved = (root_resolved / candidate).resolve()
+    try:
+        path_resolved.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return path_resolved
 
 
 def _extract_json_block(text: str) -> dict | list:
@@ -527,7 +541,9 @@ async def create_pull_request(
     _run(["git", "checkout", "-B", branch, f"origin/{default_branch}"], cwd=local)
 
     for rel_path, content in file_rewrites.items():
-        full_path = local / rel_path
+        full_path = _safe_repo_path(local, rel_path)
+        if full_path is None:
+            raise ValueError(f"Invalid rewrite path: {rel_path}")
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content)
 
@@ -555,7 +571,6 @@ async def create_pull_request(
 
 
 def _get_or_create_fork(user, upstream):
-    login = user.login
     try:
         return user.get_repo(upstream.name)
     except GithubException:
@@ -810,8 +825,6 @@ async def implement_feature(
 
     return {
         "analysis": analysis_text,
-        "acceptance_criteria": acceptance_criteria,
-        "is_actionable": ac_data.get("is_actionable", True),
         "file_rewrites": file_rewrites,
         "pr_title": pr_title,
         "pr_body": pr_body,
@@ -866,7 +879,9 @@ async def create_feature_pull_request(
     _run(["git", "checkout", "-B", branch, f"origin/{default_branch}"], cwd=local)
 
     for rel_path, content in file_rewrites.items():
-        full_path = local / rel_path
+        full_path = _safe_repo_path(local, rel_path)
+        if full_path is None:
+            raise ValueError(f"Invalid rewrite path: {rel_path}")
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content)
 

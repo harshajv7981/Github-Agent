@@ -1,0 +1,56 @@
+:root {
+  --ink: #283b32;
+  --muted: #7b877c;
+  --line: #e5e9e0;
+  --paper: #f4f6f0;
+  --surface: #fffefa;
+  --forest: #183c34;
+  --leaf: #d9ed9b;
+  --coral: #b86f56;
+  --sans: 'Avenir Next', Avenir, 'Segoe UI', sans-serif;
+  --display: 'Iowan Old Style', 'Baskerville', 'Palatino Linotype', Georgia, serif;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: var(--sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background-color: var(--paper);
+  background-image: linear-gradient(rgba(73, 95, 75, .025) 1px, transparent 1px);
+  background-size: 100% 32px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible {
+  outline: 2px solid #86a87a;
+  outline-offset: 2px;
+}
+
+::selection {
+  color: #203a2f;
+  background: #d9ed9b;
+}
+
+#root {
+  min-height: 100vh;
+}

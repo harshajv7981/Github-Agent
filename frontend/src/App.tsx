@@ -32,6 +32,8 @@ import {
   X,
   XCircle,
 } from 'lucide-react'
+
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8000'
 import './App.css'
 
 type Repo = {
@@ -234,19 +236,19 @@ function App() {
   const fetchData = async () => {
 
     try {
-      fetch('http://localhost:8000/api/telemetry')
+      fetch(`${API_BASE}/api/telemetry`)
         .then(res => res.json())
         .then(data => setTelemetry(data))
         .catch(() => {})
-    } catch(e) {}
+    } catch {}
 
     try {
       const [reposRes, issuesRes, runsRes, prsRes, featuresRes] = await Promise.all([
-        fetch('http://localhost:8000/api/repositories'),
-        fetch('http://localhost:8000/api/issues'),
-        fetch('http://localhost:8000/api/runs'),
-        fetch('http://localhost:8000/api/pull-requests'),
-        fetch('http://localhost:8000/api/features'),
+        fetch(`${API_BASE}/api/repositories`),
+        fetch(`${API_BASE}/api/issues`),
+        fetch(`${API_BASE}/api/runs`),
+        fetch(`${API_BASE}/api/pull-requests`),
+        fetch(`${API_BASE}/api/features`),
         
       ])
 
@@ -312,7 +314,7 @@ function App() {
 
   useEffect(() => {
     const controller = new AbortController()
-    fetch('http://localhost:8000/api/health', { signal: controller.signal })
+    fetch(`${API_BASE}/api/health`, { signal: controller.signal })
       .then((response) => {
         if (!response.ok) throw new Error('Health request failed')
         return response.json() as Promise<OllamaHealth>
@@ -342,7 +344,7 @@ function App() {
     if (!activeRun) return
     const id = setInterval(fetchData, 2000)
     return () => clearInterval(id)
-  }, [activeRun?.id])
+  }, [activeRun?.id ?? null])
 
   const filteredRepos = useMemo(
     () =>
@@ -369,7 +371,7 @@ function App() {
     setScanning(true)
 
     try {
-      const response = await fetch('http://localhost:8000/api/discovery/trigger', {
+      const response = await fetch(`${API_BASE}/api/discovery/trigger`, {
         method: 'POST',
       })
 
@@ -377,11 +379,9 @@ function App() {
         const data = await response.json()
         console.log('Discovery started:', data)
         setLastScan('Running...')
-
-        setTimeout(() => {
-          fetchData()
-          setLastScan('Just now')
-        }, 5000)
+        // Set activeRun immediately so the fast-poll effect kicks in right away
+        setActiveRun({ id: data.run_id, name: 'Manual repository discovery', status: 'running', repositories_scanned: 0, issues_found: 0, created_at: 'Just now' })
+        fetchData()
       }
     } catch (err) {
       console.error('Failed to trigger discovery:', err)
@@ -394,7 +394,7 @@ function App() {
     setSuggestingRepo((prev) => ({ ...prev, [repoFullName]: true }))
     try {
       const res = await fetch(
-        `http://localhost:8000/api/repositories/${repoFullName}/suggest-features`,
+        `${API_BASE}/api/repositories/${repoFullName}/suggest-features`,
         {
           method: 'POST',
         },
@@ -425,7 +425,7 @@ function App() {
   ) {
     setFeatureSandboxState((prev) => ({ ...prev, [feature.id]: { loading: true } }))
     try {
-      const res = await fetch(`http://localhost:8000/api/features/${feature.id}/sandbox-verify`, {
+      const res = await fetch(`${API_BASE}/api/features/${feature.id}/sandbox-verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -455,7 +455,7 @@ function App() {
   ) {
     setFeatureHealingState((prev) => ({ ...prev, [feature.id]: { loading: true } }))
     try {
-      const res = await fetch('http://localhost:8000/api/sandbox/auto-heal', {
+      const res = await fetch(`${API_BASE}/api/sandbox/auto-heal`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -505,7 +505,7 @@ function App() {
   async function runIssueSandbox(issue: Issue, file_rewrites: Record<string, string>) {
     setIssueSandboxState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
     try {
-      const res = await fetch(`http://localhost:8000/api/issues/${issue.id}/sandbox-verify`, {
+      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/sandbox-verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -535,7 +535,7 @@ function App() {
   ) {
     setIssueHealingState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
     try {
-      const res = await fetch('http://localhost:8000/api/sandbox/auto-heal', {
+      const res = await fetch(`${API_BASE}/api/sandbox/auto-heal`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -585,7 +585,7 @@ function App() {
   async function implementFeature(feature: FeatureSuggestion) {
     setFeatureImplementState((prev) => ({ ...prev, [feature.id]: { loading: true } }))
     try {
-      const res = await fetch(`http://localhost:8000/api/features/${feature.id}/implement`, {
+      const res = await fetch(`${API_BASE}/api/features/${feature.id}/implement`, {
         method: 'POST',
       })
       if (!res.ok) {
@@ -608,7 +608,7 @@ function App() {
   async function submitFeaturePR(feature: FeatureSuggestion, result: ImplementFeatureResult) {
     setFeaturePrSubmitting((prev) => ({ ...prev, [feature.id]: true }))
     try {
-      const res = await fetch(`http://localhost:8000/api/features/${feature.id}/create-pr`, {
+      const res = await fetch(`${API_BASE}/api/features/${feature.id}/create-pr`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -635,7 +635,7 @@ function App() {
   async function analyzeIssue(issue: Issue) {
     setAnalyzeState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
     try {
-      const res = await fetch(`http://localhost:8000/api/issues/${issue.id}/analyze`, {
+      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/analyze`, {
         method: 'POST',
       })
       if (!res.ok) {
@@ -659,7 +659,7 @@ function App() {
   async function runDiffReview(issue: Issue, analyzeRes: AnalyzeResult, sandboxRes?: SandboxReport) {
     setReviewState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
     try {
-      const res = await fetch(`http://localhost:8000/api/issues/${issue.id}/review-patch`, {
+      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/review-patch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -680,7 +680,7 @@ function App() {
   async function submitPR(issue: Issue, result: AnalyzeResult) {
     setPrSubmitting((prev) => ({ ...prev, [issue.id]: true }))
     try {
-      const res = await fetch(`http://localhost:8000/api/issues/${issue.id}/create-pr`, {
+      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/create-pr`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -909,13 +909,14 @@ function App() {
               </p>
             </div>
             <div className="heading-actions">
+              {(isOverview || activeTab === 'Repositories') && (
               <button
                 className="button button-primary"
                 type="button"
                 onClick={runDiscovery}
-                disabled={scanning}
+                disabled={scanning || !!activeRun}
               >
-                {scanning ? (
+                {(scanning || activeRun) ? (
                   <>
                     <Loader size={16} className="spin" /> Scanning...
                   </>
@@ -925,6 +926,7 @@ function App() {
                   </>
                 )}
               </button>
+              )}
             </div>
           </section>
 

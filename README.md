@@ -103,7 +103,7 @@
 ## 📂 Repository Structure
 
 ```
-Github-Agent/
+Patchwork/
 ├── backend/
 │   └── app/
 │       ├── main.py              # FastAPI application, route handlers, Pydantic schemas

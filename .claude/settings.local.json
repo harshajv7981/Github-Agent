@@ -33,7 +33,7 @@
       "Bash(ollama pull *)",
       "Bash(lsof -ti:8000)",
       "Bash(xargs kill -9)",
-      "Bash(PYTHONPATH=/Users/chintugoddanti/Desktop/Github-Agent python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(PYTHONPATH=/Users/chintugoddanti/Desktop/Patchwork python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload)",
       "Bash(python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload)",
       "Bash(cat /tmp/backend.log 2>&1 | tail -20)",
       "Read(//private/tmp/**)",

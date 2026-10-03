@@ -1,0 +1,105 @@
+@media (max-width: 1220px) {
+  .sidebar { width: 218px; }
+  .main-area { margin-left: 218px; }
+  .topbar { padding: 0 28px; }
+  .page-content { padding-right: 28px; padding-left: 28px; }
+  .content-grid { grid-template-columns: minmax(0, 1.45fr) minmax(260px, .9fr); }
+  .metric-card { padding-right: 12px; padding-left: 12px; }
+}
+
+@media (max-width: 1020px) {
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .content-grid { grid-template-columns: minmax(0, 1fr); }
+  .issue-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .issue-panel > .panel-header { grid-column: 1 / -1; }
+  .issue-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 14px; }
+  .issue-item:nth-child(2) { border-top: 1px solid #ecefe7; }
+  .queue-link { align-self: end; }
+}
+
+@media (max-width: 760px) {
+  .sidebar {
+    width: 100%;
+    height: auto;
+    position: sticky;
+    inset: 0 0 auto;
+    display: block;
+    padding: 10px 14px 0;
+  }
+  .brand { margin: 0 0 10px 2px; font-size: 18px; }
+  .brand-mark { width: 26px; height: 26px; }
+  .workspace-switcher,
+  .side-label,
+  .setup-card,
+  .settings-button,
+  .sidebar-bottom { display: none; }
+  .side-nav {
+    display: flex;
+    gap: 3px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .side-nav::-webkit-scrollbar { display: none; }
+  .nav-item {
+    width: auto;
+    min-width: max-content;
+    min-height: 34px;
+    gap: 6px;
+    padding: 0 9px;
+    border-radius: 5px 5px 0 0;
+  }
+  .nav-item > span:nth-of-type(1) { font-size: 10px; }
+  .nav-item svg { width: 14px; height: 14px; }
+  .nav-count { min-width: 17px; height: 16px; font-size: 9px; }
+  .main-area { margin-left: 0; }
+  .topbar { height: 43px; padding: 0 16px; }
+  .topbar-status,
+  .help-button,
+  .topbar-divider { display: none; }
+  .topbar-actions { gap: 4px; }
+  .page-content { padding: 25px 16px 16px; }
+  .page-heading { align-items: flex-start; flex-direction: column; gap: 16px; margin-bottom: 17px; }
+  .page-heading h1 { font-size: 30px; }
+  .title-break { display: initial; }
+  .heading-subtitle { font-size: 11px; }
+  .heading-actions { width: 100%; }
+  .heading-actions .button { flex: 1; }
+  .metric-grid { gap: 8px; margin-bottom: 12px; }
+  .metric-card { min-height: 116px; padding: 12px 11px 9px; }
+  .metric-top { font-size: 7px; letter-spacing: .3px; }
+  .metric-top svg { width: 14px; }
+  .metric-value { font-size: 26px; }
+  .metric-foot { flex-wrap: wrap; font-size: 8px; }
+  .metric-highlight,
+  .metric-up { font-size: 8px; }
+  .model-metric { gap: 6px; }
+  .model-orbit { width: 27px; height: 27px; }
+  .model-metric strong { font-size: 9px; }
+  .model-metric small { font-size: 8px; }
+  .content-grid { gap: 11px; }
+  .repo-table { min-width: 610px; }
+  .repo-toolbar { padding-right: 10px; padding-left: 10px; }
+  .filter-button { gap: 4px; padding: 0 6px; font-size: 8px; }
+  .panel-header { min-height: 59px; padding-right: 12px; padding-left: 12px; }
+  .repo-table th:first-child,
+  .repo-table td:first-child { padding-left: 10px; }
+  .issue-panel { display: block; }
+  .issue-list { display: block; padding-right: 11px; padding-left: 11px; }
+  .issue-filter-bar { align-items: stretch; flex-direction: column; }
+  .issue-filter-bar .search-field { min-width: 0; }
+  .issue-item:nth-child(2) { border-top: 0; }
+  .activity-panel,
+  .runs-panel,
+  .settings-panel { margin-top: 11px; }
+  .activity-header { align-items: flex-start; flex-direction: column; gap: 2px; padding-top: 12px; padding-bottom: 10px; }
+  .activity-header-actions { width: 100%; justify-content: space-between; gap: 8px; }
+  .pr-table { min-width: 590px; }
+  .pr-table th:first-child,
+  .pr-table td:first-child { padding-left: 10px; }
+  .page-footer { align-items: flex-start; flex-direction: column; gap: 7px; padding-top: 14px; }
+}
+
+/* ========================================================
+   ISOLATED TEST SANDBOX & AUTO-HEALING STYLES
+   ======================================================== */
+

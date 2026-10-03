@@ -47,6 +47,7 @@
   3. 🏷️ **Static Type Checking (`mypy`)**: Type mismatch detection with `--ignore-missing-imports`.
   4. 🧪 **Automated Unit Testing (`pytest`)**: Targeted test execution with `-q -o addopts="" --tb=short` and timeout defense.
 - **Real-Time Report Card**: Live dashboard tab showing test counts, pass/fail status, execution duration, and formatted failure tracebacks.
+- **Terminal Error Recovery**: `/api/sandbox/verify` accepts an optional shell-free `terminal_command` token list (for example, `["python", "-m", "pytest", "tests"]`); its exit code and output are captured and sent to the self-healing loop. Healing defaults to 10 attempts and can be changed with `OPENROUTER_HEAL_MAX_ATTEMPTS`.
 
 ### 5. AI Self-Healing Loop (Capped at 3 Attempts)
 - **Automated Failure Diagnostics**: Ingests test failure tracebacks, compilation errors, and linter warnings from the sandbox.
@@ -174,10 +175,43 @@ OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3.5:9b
 OLLAMA_CODING_MODEL=qwen3.5:9b
 OLLAMA_REVIEW_MODEL=qwen3.5:9b
+LLM_PROVIDER=ollama
+OPENROUTER_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
+OPENROUTER_API_KEY=
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_API_KEY=
+GROQ_REASONING_EFFORT=medium
 SANDBOX_RUNTIME=process
 SANDBOX_DOCKER_IMAGE=patchwork-sandbox:latest
 GITHUB_WEBHOOK_SECRET=replace_with_a_random_secret
 ```
+
+To use OpenRouter instead of Ollama, set `LLM_PROVIDER=openrouter`, create a replacement OpenRouter key, and put it in `OPENROUTER_API_KEY`. The default OpenRouter model is `nvidia/nemotron-3-ultra-550b-a55b:free`; Ollama remains available with `LLM_PROVIDER=ollama`. Restart the backend after changing `.env`. Do not commit API keys or use the previously exposed key.
+
+To use Groq instead, set `LLM_PROVIDER=groq`, put your key in `GROQ_API_KEY`, and use `GROQ_MODEL=openai/gpt-oss-120b` (the default). `GROQ_REASONING_EFFORT=medium` is used by default and can be set to `none` for models that do not support reasoning. Restart the backend after changing `.env`.
+
+### Agent Workflow API
+
+Patchwork's durable contribution agent can select work autonomously or run a specific issue:
+
+```text
+POST /api/agent-runs/next
+   -> acceptance criteria -> failing regression test -> patch -> sandbox -> independent review
+   -> approval -> PR -> CI monitoring -> approval-gated follow-up repair
+```
+
+Useful endpoints:
+
+- `POST /api/agent-runs` starts a workflow for a specific `issue_id`.
+- `POST /api/agent-runs/next` selects the highest-ranked unclaimed actionable issue.
+- `GET /api/agent-runs/{id}` reads durable state and budget usage.
+- `GET /api/agent-runs/{id}/steps` reads persisted checkpoints and tool results.
+- `POST /api/agent-runs/{id}/resume` resumes a failed or queued run.
+- `POST /api/agent-runs/{id}/approve-pr` creates a PR after human approval.
+- `POST /api/pull-requests/{id}/ci-repair` proposes a repair from failed CI logs.
+- `POST /api/pull-requests/{id}/ci-repair/approve` commits an approved follow-up.
+
+Generated patches are limited to 20 files and 250,000 characters. Test execution, PR creation, and CI follow-up commits are approval-gated. Groq requests that exceed the account token-per-minute limit are retried with smaller completions and lower reasoning effort.
 
 If PR creation reports `403 Resource not accessible by personal access token` while creating a fork, create the fork manually from the target repository's GitHub **Fork** button and retry. Patchwork will reuse an existing fork. Otherwise replace the token with a classic PAT that has the `repo` scope and authorize it for the target repository.
 
@@ -240,7 +274,7 @@ The React dashboard will be live at **`http://localhost:5173`**.
 
 ## 🔒 Safety & Isolation Philosophy
 
-- **Local-First & Private**: Code analysis, ideation, and generation run 100% locally through Ollama. No proprietary source code is uploaded to third-party cloud LLMs.
+- **Provider choice**: Ollama runs locally. OpenRouter sends prompts and repository context to a hosted model provider; use it only for repositories and code you are comfortable sharing under the provider's terms.
 - **Selectable Sandbox Isolation**: Development defaults to process mode. Production can set `SANDBOX_RUNTIME=docker` and build `Dockerfile.sandbox` for a container with no network, read-only root filesystem, dropped capabilities, no-new-privileges, CPU/memory/PID limits, strict timeouts, and automatic cleanup.
   - **Credential Scrubbing**: `GITHUB_TOKEN`, `DATABASE_URL`, API keys, and any environment variable matching `TOKEN`, `SECRET`, `PASSWORD`, or `CREDENTIAL` patterns are stripped from the sandbox environment.
   - **Memory Limits**: `ulimit -v` caps sandbox process virtual memory at 512 MB on Linux/macOS.

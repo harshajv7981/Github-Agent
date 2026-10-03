@@ -136,6 +136,20 @@ class GitHubService:
             print(f"Error fetching issues from {repo_full_name}: {e}")
             return []
 
+    def get_open_issue_numbers(self, repo_full_name: str) -> set[int] | None:
+        """Return current open issue numbers, or None when GitHub cannot be read."""
+        try:
+            repo = self.client.get_repo(repo_full_name)
+            return {issue.number for issue in repo.get_issues(state="open") if not issue.pull_request}
+        except GithubException as error:
+            print(f"Error fetching open issue state from {repo_full_name}: {error}")
+            return None
+
+    def get_issue_state(self, repo_full_name: str, issue_number: int) -> str:
+        """Read the authoritative current GitHub state for one issue."""
+        repo = self.client.get_repo(repo_full_name)
+        return str(repo.get_issue(issue_number).state).lower()
+
     def _extract_repo_data(self, repo: GithubRepo) -> dict:
         """Extract relevant data from a GitHub repository object."""
 
@@ -473,3 +487,67 @@ class GitHubService:
                 check["status"] == "completed" for check in checks
             ),
         }
+
+        def get_pull_request_failure_logs(self, repo_full_name: str, pr_number: int) -> dict:
+            """Fetch bounded GitHub Actions logs for failed checks on a pull request."""
+            repo = self.client.get_repo(repo_full_name)
+            pull_request = repo.get_pull(pr_number)
+            runs = repo.get_workflow_runs(head_sha=pull_request.head.sha)
+            failures: list[dict[str, str]] = []
+            for workflow_run in runs:
+                if workflow_run.conclusion not in {"failure", "timed_out", "cancelled", "action_required"}:
+                    continue
+                try:
+                    raw_logs = workflow_run.get_logs()
+                    if isinstance(raw_logs, bytes):
+                        logs = raw_logs.decode("utf-8", errors="replace")
+                    else:
+                        logs = str(raw_logs)
+                except Exception as error:
+                    logs = f"Unable to download workflow logs: {error}"
+                failures.append({
+                    "name": workflow_run.name,
+                    "status": workflow_run.status,
+                    "conclusion": workflow_run.conclusion,
+                    "url": workflow_run.html_url,
+                    "logs": logs[-100_000:],
+                })
+            return {
+                "repository": repo_full_name,
+                "pull_request_number": pr_number,
+                "commit_sha": pull_request.head.sha,
+                "failures": failures,
+            }
+
+        def apply_pull_request_followup(
+            self,
+            repo_full_name: str,
+            pr_number: int,
+            file_rewrites: dict[str, str],
+            commit_message: str,
+        ) -> dict:
+            """Commit approved follow-up rewrites to the existing PR head branch."""
+            upstream = self.client.get_repo(repo_full_name)
+            pull_request = upstream.get_pull(pr_number)
+            if pull_request.head.repo is None:
+                raise RuntimeError("Pull request head repository is unavailable")
+            fork = self.client.get_repo(pull_request.head.repo.full_name)
+            updated: list[str] = []
+            for path, content in file_rewrites.items():
+                current = fork.get_contents(path, ref=pull_request.head.ref)
+                if isinstance(current, list):
+                    raise ValueError(f"Follow-up path is a directory: {path}")
+                fork.update_file(
+                    path,
+                    commit_message,
+                    content,
+                    current.sha,
+                    branch=pull_request.head.ref,
+                )
+                updated.append(path)
+            return {
+                "repository": repo_full_name,
+                "pull_request_number": pr_number,
+                "branch": pull_request.head.ref,
+                "files": updated,
+            }

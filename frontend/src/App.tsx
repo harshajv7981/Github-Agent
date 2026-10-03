@@ -1,19 +1,19 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
-  AlertTriangle,
   ArrowRight,
   ArrowUpRight,
   Bell,
   CheckCircle2,
+  ChevronLeft,
   ChevronDown,
+  ChevronRight,
   CircleCheck,
   CircleDot,
   Clock3,
   Code2,
   ExternalLink,
   Flame,
-  FlaskConical,
   GitPullRequest,
   LayoutDashboard,
   ListTodo,
@@ -30,185 +30,59 @@ import {
   Terminal,
   Wand2,
   X,
-  XCircle,
 } from 'lucide-react'
 
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8000'
 import './App.css'
-
-type Repo = {
-  name: string
-  owner: string
-  description: string
-  stars: string
-  language: string
-  issues: number
-  score: number
-  trend: string
-  color: string
-  initials: string
-}
-
-type SandboxReport = {
-  success: boolean
-  overall_status: 'passed' | 'warnings' | 'failed'
-  score: number
-  execution_time_seconds: number
-  environment: string
-  checks: {
-    syntax: {
-      passed: boolean
-      checked_files: string[]
-      errors: { file: string; message: string }[]
-      summary: string
-    }
-    linter: {
-      passed: boolean
-      tool: string
-      warnings_count: number
-      warnings: { file: string; line: string; col: string; message: string }[]
-      summary: string
-    }
-    type_check: {
-      passed: boolean
-      tool: string
-      errors_count: number
-      errors: string[]
-      summary: string
-    }
-    tests: {
-      passed: boolean
-      tests_run: number
-      passed_count: number
-      failed_count: number
-      error_count: number
-      duration_seconds: number
-      output: string
-      summary: string
-    }
-  }
-  summary: string
-  modified_files: string[]
-}
-
-type RegressionTestResult = {
-  issue_id: number
-  test_path: string
-  test_content: string
-  explanation: string
-  before_result: SandboxReport
-  fails_before_patch: boolean
-}
-
-type Issue = {
-  id: number
-  repo: string
-  title: string
-  number: string
-  rawNumber: number
-  label: string
-  age: string
-  difficulty: 'Good first issue' | 'Intermediate'
-  body?: string
-  ai_analysis?: string
-  agent_status?: string
-  sandbox_result?: SandboxReport
-}
-
-type PullRequest = {
-  id: number
-  repository: string
-  title: string
-  number?: number
-  url?: string
-  status: string
-  issue_number?: number
-  issue_url?: string
-  ai_summary?: string
-  sandbox_result?: SandboxReport
-  created_at: string
-}
-
-type OllamaHealth = {
-  ollama_connected: boolean
-  configured_model: string
-  model_available: boolean
-}
-
-type ActiveRun = {
-  id: number
-  name: string
-  status: string
-  repositories_scanned: number
-  issues_found: number
-  summary?: string
-  created_at: string
-}
-
-type AnalyzeResult = {
-  issue_id: number
-  analysis: string
-  pr_title: string
-  pr_body: string
-  acceptance_criteria?: string[]
-  is_actionable?: boolean
-  relevant_files: string[]
-  file_rewrites: Record<string, string>
-}
-
-type FeatureSuggestion = {
-  id: number
-  repository: string
-  title: string
-  description: string
-  category: string
-  complexity: string
-  impact_score: number
-  implementation_plan: string
-  suggested_files: string[]
-  status: string
-  ai_analysis?: string
-  pr_title?: string
-  pr_body?: string
-  sandbox_result?: SandboxReport
-  created_at: string
-}
-
-type ImplementFeatureResult = {
-  feature_id: number
-  analysis: string
-  pr_title: string
-  pr_body: string
-  acceptance_criteria?: string[]
-  is_actionable?: boolean
-  relevant_files: string[]
-  file_rewrites: Record<string, string>
-}
+import { API_BASE, postJson } from './app/api'
+import type {
+  ActiveRun,
+  AgentRun,
+  AgentStep,
+  FeatureSuggestion,
+  ImplementFeatureResult,
+  Issue,
+  OllamaHealth,
+  PullRequest,
+  Repo,
+  SandboxReport,
+} from './app/types'
+import { SandboxPanel } from './app/SandboxPanel'
 
 function App() {
   const [activeTab, setActiveTab] = useState('Overview')
   const [query, setQuery] = useState('')
-  const [pythonOnly, setPythonOnly] = useState(false)
+  const [pythonOnly, setPythonOnly] = useState(
+    () => localStorage.getItem('patchwork.python-only') !== 'false',
+  )
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    () => localStorage.getItem('patchwork.notifications-enabled') !== 'false',
+  )
+  const [toast, setToast] = useState<{ title: string; message: string } | null>(null)
   const [scanning, setScanning] = useState(false)
   const [lastScan, setLastScan] = useState('Today, 09:02')
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null)
   const [selectedFeature, setSelectedFeature] = useState<FeatureSuggestion | null>(null)
   const [ollamaHealth, setOllamaHealth] = useState<OllamaHealth | null>(null)
+  const activeProviderLabel = ollamaHealth?.provider === 'openrouter'
+    ? 'OpenRouter'
+    : ollamaHealth?.provider === 'ollama'
+      ? 'Ollama'
+      : ollamaHealth?.provider === 'groq'
+        ? 'Groq'
+        : 'AI'
   const [telemetry, setTelemetry] = useState<any>(null)
   const [realRepos, setRealRepos] = useState<Repo[]>([])
   const [realIssues, setRealIssues] = useState<Issue[]>([])
   const [features, setFeatures] = useState<FeatureSuggestion[]>([])
   const [runs, setRuns] = useState<any[]>([])
+  const [agentRunHistory, setAgentRunHistory] = useState<AgentRun[]>([])
   const [pullRequests, setPullRequests] = useState<PullRequest[]>([])
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null)
+  const [agentRuns, setAgentRuns] = useState<Record<number, AgentRun>>({})
+  const [agentSteps, setAgentSteps] = useState<Record<number, AgentStep[]>>({})
+  const previousRunStatuses = useRef<Record<number, string>>({})
 
-  // Per-issue analyze state: issueId -> { loading, result, error }
-  const [analyzeState, setAnalyzeState] = useState<
-    Record<number, { loading: boolean; result?: AnalyzeResult; error?: string }>
-  >({})
   // Per-issue PR submit state
-  const [prSubmitting, setPrSubmitting] = useState<Record<number, boolean>>({})
-  const [reviewState, setReviewState] = useState<Record<number, {loading: boolean, result?: any}>>({})
   const [expandedFile, setExpandedFile] = useState<string | null>(null)
 
   // Per-repo feature suggesting state: repo_full_name -> boolean
@@ -221,31 +95,55 @@ function App() {
   const [featurePrSubmitting, setFeaturePrSubmitting] = useState<Record<number, boolean>>({})
   const [featureCategoryFilter, setFeatureCategoryFilter] = useState('all')
   const [quickSuggestRepo, setQuickSuggestRepo] = useState('')
+  const [issueQuery, setIssueQuery] = useState('')
+  const [issueDifficultyFilter, setIssueDifficultyFilter] = useState('all')
+  const [issueStatusFilter, setIssueStatusFilter] = useState('all')
+  const [issueFiltersOpen, setIssueFiltersOpen] = useState(false)
+  const [issuePage, setIssuePage] = useState(1)
+  const [issueTotalCount, setIssueTotalCount] = useState(0)
 
   // Sandbox states
-  const [issueSandboxState, setIssueSandboxState] = useState<
-    Record<number, { loading: boolean; report?: SandboxReport; error?: string }>
-  >({})
-  const [regressionTestState, setRegressionTestState] = useState<
-    Record<number, { loading: boolean; result?: RegressionTestResult; error?: string }>
-  >({})
   const [featureSandboxState, setFeatureSandboxState] = useState<
-    Record<number, { loading: boolean; report?: SandboxReport; error?: string }>
-  >({})
-  const [issueHealingState, setIssueHealingState] = useState<
-    Record<number, { loading: boolean; analysis?: string }>
+    Record<number, { loading: boolean; report?: SandboxReport; error?: string; activity?: string[] }>
   >({})
   const [featureHealingState, setFeatureHealingState] = useState<
     Record<number, { loading: boolean; analysis?: string }>
   >({})
-  const [issueSandboxTab, setIssueSandboxTab] = useState<
-    'tests' | 'linter' | 'types' | 'syntax' | 'logs'
-  >('tests')
   const [featureSandboxTab, setFeatureSandboxTab] = useState<
     'tests' | 'linter' | 'types' | 'syntax' | 'logs'
   >('tests')
 
-  const fetchData = async () => {
+  function notify(title: string, message: string) {
+    if (!notificationsEnabled) return
+    setToast({ title, message })
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, { body: message })
+    }
+  }
+
+  async function toggleNotifications() {
+    const next = !notificationsEnabled
+    setNotificationsEnabled(next)
+    localStorage.setItem('patchwork.notifications-enabled', String(next))
+
+    if (!next) {
+      setToast(null)
+      return
+    }
+
+    if ('Notification' in window && Notification.permission === 'default') {
+      await Notification.requestPermission()
+    }
+    notify('Notifications enabled', 'Patchwork will notify you about discovery and PR updates.')
+  }
+
+  function updatePythonOnly(enabled: boolean) {
+    setPythonOnly(enabled)
+    localStorage.setItem('patchwork.python-only', String(enabled))
+    void fetchData(enabled)
+  }
+
+  const fetchData = async (filterToPython = pythonOnly) => {
 
     try {
       fetch(`${API_BASE}/api/telemetry`)
@@ -255,10 +153,11 @@ function App() {
     } catch {}
 
     try {
-      const [reposRes, issuesRes, runsRes, prsRes, featuresRes] = await Promise.all([
-        fetch(`${API_BASE}/api/repositories`),
-        fetch(`${API_BASE}/api/issues`),
+      const [reposRes, issuesRes, runsRes, agentRunsRes, prsRes, featuresRes] = await Promise.all([
+        fetch(`${API_BASE}/api/repositories${filterToPython ? '?language=Python' : ''}`),
+        fetch(`${API_BASE}/api/issues?limit=20&offset=${(issuePage - 1) * 20}`),
         fetch(`${API_BASE}/api/runs`),
+        fetch(`${API_BASE}/api/agent-runs?limit=50`),
         fetch(`${API_BASE}/api/pull-requests`),
         fetch(`${API_BASE}/api/features`),
         
@@ -285,6 +184,7 @@ function App() {
       }
 
       if (issuesRes.ok) {
+        setIssueTotalCount(Number(issuesRes.headers.get('X-Total-Count') ?? 0))
         const issuesData = await issuesRes.json()
         const mapped = issuesData.map((i: any) => ({
           id: i.id,
@@ -310,9 +210,25 @@ function App() {
 
       if (runsRes.ok) {
         const runsData = await runsRes.json()
+        for (const run of runsData) {
+          if (
+            previousRunStatuses.current[run.id] === 'running' &&
+            run.status !== 'running'
+          ) {
+            notify(
+              run.status === 'completed' ? 'Discovery complete' : 'Discovery needs attention',
+              run.summary || `Discovery finished with status: ${run.status}`,
+            )
+          }
+          previousRunStatuses.current[run.id] = run.status
+        }
         setRuns(runsData)
         const running = runsData.find((r: any) => r.status === 'running') ?? null
         setActiveRun(running)
+      }
+
+      if (agentRunsRes.ok) {
+        setAgentRunHistory(await agentRunsRes.json())
       }
 
       if (prsRes.ok) {
@@ -323,6 +239,12 @@ function App() {
       console.error('Failed to fetch data:', err)
     }
   }
+
+  useEffect(() => {
+    if (!toast) return
+    const timeout = window.setTimeout(() => setToast(null), 5000)
+    return () => window.clearTimeout(timeout)
+  }, [toast])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -336,8 +258,9 @@ function App() {
         if (!controller.signal.aborted) {
           setOllamaHealth({
             ollama_connected: false,
-            configured_model: 'qwen3.5:9b',
+            configured_model: 'nvidia/nemotron-3-ultra-550b-a55b:free',
             model_available: false,
+            provider: 'openrouter',
           })
         }
       })
@@ -349,7 +272,7 @@ function App() {
       controller.abort()
       clearInterval(interval)
     }
-  }, [])
+  }, [issuePage])
 
   // Fast-poll while a discovery run is active
   useEffect(() => {
@@ -378,6 +301,45 @@ function App() {
     [features, featureCategoryFilter],
   )
 
+  const filteredIssues = useMemo(
+    () =>
+      realIssues.filter((issue) => {
+        const matchesQuery = `${issue.repo} ${issue.title} ${issue.label}`
+          .toLowerCase()
+          .includes(issueQuery.toLowerCase())
+        const matchesDifficulty =
+          issueDifficultyFilter === 'all' || issue.difficulty === issueDifficultyFilter
+        const matchesStatus =
+          issueStatusFilter === 'all' || (issue.agent_status ?? 'unstarted') === issueStatusFilter
+        return matchesQuery && matchesDifficulty && matchesStatus
+      }),
+    [realIssues, issueQuery, issueDifficultyFilter, issueStatusFilter],
+  )
+
+  const issuePageSize = 20
+  const hasClientIssueFilter = Boolean(
+    issueQuery || issueDifficultyFilter !== 'all' || issueStatusFilter !== 'all',
+  )
+  const issueCountForPagination = hasClientIssueFilter ? filteredIssues.length : issueTotalCount
+  const totalIssuePages = Math.max(1, Math.ceil(issueCountForPagination / issuePageSize))
+  const currentIssuePage = Math.min(issuePage, totalIssuePages)
+  const visibleIssues = activeTab === 'Overview'
+    ? filteredIssues.slice(0, 3)
+    : filteredIssues
+
+  useEffect(() => {
+    setIssuePage(1)
+  }, [issueQuery, issueDifficultyFilter, issueStatusFilter])
+
+  const combinedRuns = [
+    ...runs.map((run) => ({ ...run, kind: 'discovery' as const })),
+    ...agentRunHistory.map((run) => ({ ...run, kind: 'agent' as const })),
+  ].sort((left, right) => {
+    const leftDate = left.updated_at || left.created_at || ''
+    const rightDate = right.updated_at || right.created_at || ''
+    return rightDate.localeCompare(leftDate)
+  })
+
   async function runDiscovery() {
     if (scanning) return
     setScanning(true)
@@ -394,9 +356,13 @@ function App() {
         // Set activeRun immediately so the fast-poll effect kicks in right away
         setActiveRun({ id: data.run_id, name: 'Manual repository discovery', status: 'running', repositories_scanned: 0, issues_found: 0, created_at: 'Just now' })
         fetchData()
+      } else {
+        const error = await response.json().catch(() => ({}))
+        notify('Discovery could not start', error.detail || 'Please try again.')
       }
     } catch (err) {
       console.error('Failed to trigger discovery:', err)
+      notify('Discovery could not start', 'Check the backend connection and try again.')
     } finally {
       setTimeout(() => setScanning(false), 2000)
     }
@@ -435,8 +401,16 @@ function App() {
     feature: FeatureSuggestion,
     file_rewrites: Record<string, string>,
   ) {
-    setFeatureSandboxState((prev) => ({ ...prev, [feature.id]: { loading: true } }))
+    setFeatureSandboxState((prev) => ({
+      ...prev,
+      [feature.id]: { loading: true, activity: ['Preparing sandbox workspace…'] },
+    }))
+    setFeatureHealingState((prev) => ({ ...prev, [feature.id]: { loading: true } }))
     try {
+      setFeatureSandboxState((prev) => ({
+        ...prev,
+        [feature.id]: { ...prev[feature.id], loading: true, activity: ['Preparing sandbox workspace…', 'Running isolated checks…'] },
+      }))
       const res = await fetch(`${API_BASE}/api/features/${feature.id}/sandbox-verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -450,13 +424,35 @@ function App() {
         throw new Error(err.detail || 'Sandbox verification failed')
       }
       const report: SandboxReport = await res.json()
-      setFeatureSandboxState((prev) => ({ ...prev, [feature.id]: { loading: false, report } }))
+      const finalRewrites = report.file_rewrites ?? file_rewrites
+      if (report.file_rewrites) {
+        setFeatureImplementState((prev) => {
+          const existing = prev[feature.id]
+          if (!existing?.result) return prev
+          return {
+            ...prev,
+            [feature.id]: {
+              ...existing,
+              result: { ...existing.result, file_rewrites: finalRewrites },
+            },
+          }
+        })
+      }
+      setFeatureHealingState((prev) => ({
+        ...prev,
+        [feature.id]: { loading: false, analysis: report.healing_analysis },
+      }))
+      setFeatureSandboxState((prev) => ({
+        ...prev,
+        [feature.id]: { loading: false, report, activity: ['Preparing sandbox workspace…', 'Running isolated checks…', `Sandbox completed: ${report.overall_status}`] },
+      }))
       fetchData()
     } catch (err: any) {
       setFeatureSandboxState((prev) => ({
         ...prev,
-        [feature.id]: { loading: false, error: err.message ?? 'Sandbox error' },
+        [feature.id]: { loading: false, error: err.message ?? 'Sandbox error', activity: ['Preparing sandbox workspace…', 'Running isolated checks…', `Sandbox failed: ${err.message ?? 'unknown error'}`] },
       }))
+      setFeatureHealingState((prev) => ({ ...prev, [feature.id]: { loading: false } }))
     }
   }
 
@@ -514,106 +510,6 @@ function App() {
     }
   }
 
-  async function runIssueSandbox(issue: Issue, file_rewrites: Record<string, string>) {
-    setIssueSandboxState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
-    try {
-      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/sandbox-verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          repo_full_name: issue.repo,
-          file_rewrites: file_rewrites,
-        }),
-      })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Sandbox verification failed')
-      }
-      const report: SandboxReport = await res.json()
-      setIssueSandboxState((prev) => ({ ...prev, [issue.id]: { loading: false, report } }))
-      fetchData()
-    } catch (err: any) {
-      setIssueSandboxState((prev) => ({
-        ...prev,
-        [issue.id]: { loading: false, error: err.message ?? 'Sandbox error' },
-      }))
-    }
-  }
-
-  async function generateRegressionTest(issue: Issue) {
-    setRegressionTestState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
-    try {
-      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/regression-test`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Regression test generation failed')
-      }
-      const result: RegressionTestResult = await res.json()
-      setRegressionTestState((prev) => ({ ...prev, [issue.id]: { loading: false, result } }))
-    } catch (err: any) {
-      setRegressionTestState((prev) => ({
-        ...prev,
-        [issue.id]: { loading: false, error: err.message ?? 'Regression test error' },
-      }))
-    }
-  }
-
-  async function autoHealIssue(
-    issue: Issue,
-    currentRewrites: Record<string, string>,
-    diagnostics: SandboxReport,
-  ) {
-    setIssueHealingState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
-    try {
-      const res = await fetch(`${API_BASE}/api/sandbox/auto-heal`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          repo_full_name: issue.repo,
-          title: issue.title,
-          file_rewrites: currentRewrites,
-          sandbox_diagnostics: diagnostics,
-        }),
-      })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Auto-healing failed')
-      }
-      const data = await res.json()
-      const healedRewrites = data.file_rewrites
-      const analysis = data.healing_analysis
-
-      // Update the rewrites in analyzeState
-      setAnalyzeState((prev) => {
-        const existing = prev[issue.id]
-        if (!existing?.result) return prev
-        return {
-          ...prev,
-          [issue.id]: {
-            ...existing,
-            result: {
-              ...existing.result,
-              file_rewrites: healedRewrites,
-            },
-          },
-        }
-      })
-
-      setIssueHealingState((prev) => ({
-        ...prev,
-        [issue.id]: { loading: false, analysis },
-      }))
-
-      // Automatically re-run sandbox on the healed files
-      await runIssueSandbox(issue, healedRewrites)
-    } catch (err: any) {
-      alert(`Auto-healing failed: ${err.message}`)
-      setIssueHealingState((prev) => ({ ...prev, [issue.id]: { loading: false } }))
-    }
-  }
-
   async function implementFeature(feature: FeatureSuggestion) {
     setFeatureImplementState((prev) => ({ ...prev, [feature.id]: { loading: true } }))
     try {
@@ -655,6 +551,7 @@ function App() {
       }
       const pr: PullRequest = await res.json()
       setPullRequests((prev) => [pr, ...prev])
+      notify('Pull request created', `${pr.repository}: ${pr.title}`)
       fetchData()
       setSelectedFeature(null)
     } catch (err: any) {
@@ -664,75 +561,64 @@ function App() {
     }
   }
 
-  async function analyzeIssue(issue: Issue) {
-    setAnalyzeState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
+  async function startAgentWorkflow(issue: Issue) {
+    setAgentRuns((prev) => ({
+      ...prev,
+      [issue.id]: {
+        id: 0,
+        issue_id: issue.id,
+        status: 'starting',
+        current_step: 'queued',
+        attempt: 0,
+        model_requests: 0,
+        estimated_tokens: 0,
+      },
+    }))
     try {
-      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/analyze`, {
-        method: 'POST',
+      const data = await postJson<AgentRun>('/api/agent-runs', {
+        issue_id: issue.id,
+        idempotency_key: `dashboard:issue:${issue.id}`,
       })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Analysis failed')
+      setAgentRuns((prev) => ({ ...prev, [issue.id]: data }))
+
+      const poll = async () => {
+        const [runResponse, stepsResponse] = await Promise.all([
+          fetch(`${API_BASE}/api/agent-runs/${data.id}`),
+          fetch(`${API_BASE}/api/agent-runs/${data.id}/steps`),
+        ])
+        if (!runResponse.ok) return
+        const run: AgentRun = await runResponse.json()
+        setAgentRuns((prev) => ({ ...prev, [issue.id]: run }))
+        if (stepsResponse.ok) {
+          const steps: AgentStep[] = await stepsResponse.json()
+          setAgentSteps((prev) => ({ ...prev, [issue.id]: steps }))
+        }
+        if (!['awaiting_approval', 'completed', 'failed', 'cancelled'].includes(run.status)) {
+          window.setTimeout(() => void poll(), 2000)
+        }
       }
-      const result: AnalyzeResult = await res.json()
-      setAnalyzeState((prev) => ({ ...prev, [issue.id]: { loading: false, result } }))
-      // Automatically trigger sandbox verification
-      runIssueSandbox(issue, result.file_rewrites)
-      fetchData()
-    } catch (err: any) {
-      setAnalyzeState((prev) => ({
+      void poll()
+      notify('Agent workflow started', `${activeProviderLabel} is planning and validating this issue.`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to start agent workflow'
+      setAgentRuns((prev) => ({
         ...prev,
-        [issue.id]: { loading: false, error: err.message ?? 'Unknown error' },
+        [issue.id]: { ...prev[issue.id], status: 'failed', failure_reason: message } as AgentRun,
       }))
+      notify('Agent workflow failed', message)
     }
   }
 
-  
-  async function runDiffReview(issue: Issue, analyzeRes: AnalyzeResult, sandboxRes?: SandboxReport) {
-    setReviewState((prev) => ({ ...prev, [issue.id]: { loading: true } }))
+  async function approveAgentPR(issue: Issue, run: AgentRun) {
     try {
-      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/review-patch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          file_rewrites: analyzeRes.file_rewrites,
-          acceptance_criteria: analyzeRes.acceptance_criteria || [],
-          sandbox_result: sandboxRes,
-        })
+      const data = await postJson<PullRequest>(`/api/agent-runs/${run.id}/approve-pr`, {
+        reviewer: 'dashboard-user',
       })
-      if (!res.ok) throw new Error('Review failed')
-      const result = await res.json()
-      setReviewState((prev) => ({ ...prev, [issue.id]: { loading: false, result } }))
-    } catch(err: any) {
-      setReviewState((prev) => ({ ...prev, [issue.id]: { loading: false } }))
-      alert(err.message)
-    }
-  }
-
-  async function submitPR(issue: Issue, result: AnalyzeResult) {
-    setPrSubmitting((prev) => ({ ...prev, [issue.id]: true }))
-    try {
-      const res = await fetch(`${API_BASE}/api/issues/${issue.id}/create-pr`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pr_title: result.pr_title,
-          pr_body: result.pr_body,
-          file_rewrites: result.file_rewrites,
-        }),
-      })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'PR creation failed')
-      }
-      const pr: PullRequest = await res.json()
-      setPullRequests((prev) => [pr, ...prev])
-      fetchData()
-      setSelectedIssue(null)
-    } catch (err: any) {
-      alert(`PR creation failed: ${err.message}`)
-    } finally {
-      setPrSubmitting((prev) => ({ ...prev, [issue.id]: false }))
+      setPullRequests((prev) => [data, ...prev])
+      setAgentRuns((prev) => ({ ...prev, [issue.id]: { ...run, status: 'monitoring_ci' } }))
+      notify('Pull request created', data.url || `PR for ${issue.repo}`)
+    } catch (err) {
+      notify('Approval failed', err instanceof Error ? err.message : 'Unable to create pull request')
     }
   }
 
@@ -791,7 +677,8 @@ function App() {
   const showFeatures = activeTab === 'Feature Ideas'
 
   // Derive analyze state for selected issue / feature
-  const selectedAnalyze = selectedIssue ? analyzeState[selectedIssue.id] : undefined
+  const selectedAgentRun = selectedIssue ? agentRuns[selectedIssue.id] : undefined
+  const selectedAgentSteps = selectedIssue ? agentSteps[selectedIssue.id] ?? [] : []
   const selectedFeatureImplement = selectedFeature
     ? featureImplementState[selectedFeature.id]
     : undefined
@@ -828,7 +715,7 @@ function App() {
           <NavItemWithCount
             label="Issue queue"
             icon={ListTodo}
-            count={realIssues.length || undefined}
+            count={issueTotalCount || realIssues.length || undefined}
           />
           <NavItemWithCount
             label="Feature Ideas"
@@ -849,13 +736,13 @@ function App() {
             <span className={`online-dot ${ollamaHealth?.ollama_connected ? '' : 'offline'}`} />{' '}
             {ollamaHealth
               ? ollamaHealth.ollama_connected
-                ? 'Ollama connected'
-                : 'Ollama unavailable'
-              : 'Checking Ollama...'}
+                ? `${activeProviderLabel} connected`
+                : `${ollamaHealth.provider ?? 'llm'} unavailable`
+              : 'Checking LLM...'}
           </div>
           <div className="model-name">{ollamaHealth?.configured_model ?? 'qwen3.5:9b'}</div>
           <div className="setup-meta">
-            <span>localhost:11434</span>
+            <span>{activeProviderLabel}</span>
             <span className="setup-pulse">
               {ollamaHealth?.model_available ? 'MODEL READY' : 'MODEL MISSING'}
             </span>
@@ -906,18 +793,20 @@ function App() {
               <span className={`online-dot ${ollamaHealth?.ollama_connected ? '' : 'offline'}`} />{' '}
               {ollamaHealth
                 ? ollamaHealth.ollama_connected
-                  ? 'Ollama online'
-                  : 'Ollama offline'
-                : 'Checking local services'}
+                  ? `${activeProviderLabel} online`
+                  : `${ollamaHealth.provider === 'openrouter' ? 'OpenRouter' : 'LLM'} offline`
+                : 'Checking model provider'}
             </span>
             <button
-              className="icon-button notification-button"
+              className={`icon-button notification-button ${notificationsEnabled ? 'notification-enabled' : ''}`}
               type="button"
-              title="Notifications"
-              aria-label="Notifications"
+              title={notificationsEnabled ? 'Turn notifications off' : 'Turn notifications on'}
+              aria-label={notificationsEnabled ? 'Turn notifications off' : 'Turn notifications on'}
+              aria-pressed={notificationsEnabled}
+              onClick={() => void toggleNotifications()}
             >
               <Bell size={17} />
-              <i />
+              {notificationsEnabled && <i />}
             </button>
             <span className="topbar-divider" />
             <button className="help-button" type="button">
@@ -941,7 +830,7 @@ function App() {
               </p>
             </div>
             <div className="heading-actions">
-              {(isOverview || activeTab === 'Repositories') && (
+              {isOverview && (
               <button
                 className="button button-primary"
                 type="button"
@@ -1016,7 +905,7 @@ function App() {
                   <span>ISSUES WORTH A LOOK</span>
                   <ListTodo size={16} />
                 </div>
-                <div className="metric-value">{realIssues.length}</div>
+                <div className="metric-value">{issueTotalCount || realIssues.length}</div>
                 <div className="metric-foot">
                   <span className="metric-highlight">
                     {realIssues.filter((i) => i.difficulty === 'Good first issue').length} good
@@ -1065,7 +954,7 @@ function App() {
               </article>
               <article className="metric-card metric-card-dark">
                 <div className="metric-top">
-                  <span>LOCAL MODEL</span>
+                  <span>AI MODEL</span>
                   <Terminal size={16} />
                 </div>
                 <div className="model-metric">
@@ -1074,7 +963,7 @@ function App() {
                   </span>
                   <span>
                     <strong>{ollamaHealth?.configured_model ?? 'qwen3.5:9b'}</strong>
-                    <small>Served locally with Ollama</small>
+                    <small>Served via {ollamaHealth?.provider ?? 'configured provider'}</small>
                   </span>
                 </div>
                 <div className="metric-foot">
@@ -1084,7 +973,7 @@ function App() {
                     />{' '}
                     {ollamaHealth?.model_available ? 'Model ready' : 'Not available'}
                   </span>
-                  <span>Private by default</span>
+                  <span>{ollamaHealth?.provider === 'ollama' ? 'Runs locally' : 'Hosted inference'}</span>
                 </div>
               </article>
             </section>
@@ -1128,7 +1017,7 @@ function App() {
                   <button
                     type="button"
                     className={`filter-button ${pythonOnly ? 'filter-active' : ''}`}
-                    onClick={() => setPythonOnly(!pythonOnly)}
+                    onClick={() => updatePythonOnly(!pythonOnly)}
                   >
                     <SlidersHorizontal size={13} />
                     <span>Python only</span>
@@ -1248,24 +1137,64 @@ function App() {
                     <h2>
                       Issue queue{' '}
                       <span className="heading-count heading-count-warm">
-                        {realIssues.length.toString().padStart(2, '0')}
+                        {(issueTotalCount || realIssues.length).toString().padStart(2, '0')}
                       </span>
                     </h2>
                   </div>
                   <button
-                    className="icon-button panel-more"
+                    className={`icon-button panel-more ${issueFiltersOpen ? 'filter-active' : ''}`}
                     type="button"
                     title="Issue filters"
                     aria-label="Issue filters"
+                    aria-expanded={issueFiltersOpen}
+                    onClick={() => setIssueFiltersOpen((open) => !open)}
                   >
                     <Settings2 size={16} />
                   </button>
                 </div>
+                {issueFiltersOpen && (
+                  <div className="issue-filter-bar">
+                    <label className="search-field">
+                      <Search size={14} />
+                      <input
+                        value={issueQuery}
+                        onChange={(event) => setIssueQuery(event.target.value)}
+                        placeholder="Search issues"
+                        aria-label="Search issues"
+                      />
+                      {issueQuery && (
+                        <button type="button" aria-label="Clear issue search" onClick={() => setIssueQuery('')}>
+                          <X size={13} />
+                        </button>
+                      )}
+                    </label>
+                    <select
+                      className="repo-select"
+                      value={issueDifficultyFilter}
+                      onChange={(event) => setIssueDifficultyFilter(event.target.value)}
+                      aria-label="Filter by difficulty"
+                    >
+                      <option value="all">All difficulty</option>
+                      <option value="Good first issue">Good first issue</option>
+                      <option value="Intermediate">Intermediate</option>
+                    </select>
+                    <select
+                      className="repo-select"
+                      value={issueStatusFilter}
+                      onChange={(event) => setIssueStatusFilter(event.target.value)}
+                      aria-label="Filter by agent status"
+                    >
+                      <option value="all">All statuses</option>
+                      <option value="unstarted">Unstarted</option>
+                      <option value="analyzing">Analyzing</option>
+                      <option value="analyzed">Patch ready</option>
+                      <option value="pr_created">PR created</option>
+                    </select>
+                  </div>
+                )}
                 <div className="issue-list">
-                  {realIssues.length > 0 ? (
-                    realIssues
-                      .slice(0, isOverview ? 3 : realIssues.length)
-                      .map((issue) => (
+                  {filteredIssues.length > 0 ? (
+                    visibleIssues.map((issue) => (
                         <article className="issue-item" key={issue.number}>
                           <div className="issue-item-top">
                             <span
@@ -1354,21 +1283,50 @@ function App() {
                       }}
                     >
                       <p style={{ marginBottom: '0.5rem', fontSize: '0.9rem', fontWeight: 500 }}>
-                        No issues discovered yet
+                        {realIssues.length > 0 ? 'No issues match these filters' : 'No issues discovered yet'}
                       </p>
                       <p style={{ fontSize: '0.85rem', opacity: 0.7 }}>
-                        Run discovery to find contribution opportunities
+                        {realIssues.length > 0
+                          ? 'Try a different search or status.'
+                          : 'Run discovery to find contribution opportunities'}
                       </p>
                     </div>
                   )}
                 </div>
+                {!isOverview && issueCountForPagination > issuePageSize && (
+                  <div className="issue-pagination" aria-label="Issue queue pagination">
+                    <button
+                      className="icon-button"
+                      type="button"
+                      onClick={() => setIssuePage((page) => Math.max(1, page - 1))}
+                      disabled={currentIssuePage === 1}
+                      aria-label="Previous issue page"
+                      title="Previous issue page"
+                    >
+                      <ChevronLeft size={14} />
+                    </button>
+                    <span>
+                      Page {currentIssuePage} of {totalIssuePages}
+                    </span>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      onClick={() => setIssuePage((page) => Math.min(totalIssuePages, page + 1))}
+                      disabled={currentIssuePage === totalIssuePages}
+                      aria-label="Next issue page"
+                      title="Next issue page"
+                    >
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
+                )}
                 {realIssues.length > 0 && (
                   <button
                     className="queue-link"
                     type="button"
-                    onClick={() => setActiveTab('Issue queue')}
+                    onClick={() => setActiveTab(isOverview ? 'Issue queue' : 'Overview')}
                   >
-                    Open full issue queue <ArrowRight size={14} />
+                    {isOverview ? 'Open full issue queue' : 'Back to overview'} <ArrowRight size={14} />
                   </button>
                 )}
               </section>
@@ -1720,9 +1678,9 @@ function App() {
                 </button>
               </div>
               <div className="run-list">
-                {runs.length > 0 ? (
-                  runs.map((run) => (
-                    <div key={run.id}>
+                {combinedRuns.length > 0 ? (
+                  combinedRuns.map((run) => (
+                    <div key={`${run.kind}-${run.id}`}>
                       <span
                         className={`run-icon ${run.status === 'completed' ? 'run-complete' : 'run-review'}`}
                       >
@@ -1733,16 +1691,33 @@ function App() {
                         )}
                       </span>
                       <span>
-                        <strong>{run.name}</strong>
-                        <small>{run.summary || 'In progress...'}</small>
+                        <strong>
+                          {run.kind === 'agent'
+                            ? `Issue agent${run.issue_number ? ` #${run.issue_number}` : ''}`
+                            : run.name}
+                        </strong>
+                        <small>
+                          {run.kind === 'agent'
+                            ? `${run.repository ?? 'Unknown repository'}${run.issue_title ? ` · ${run.issue_title}` : ''}`
+                            : run.summary || 'In progress...'}
+                        </small>
+                        {run.kind === 'agent' && run.status === 'failed' && run.failure_reason && (
+                          <small className="run-failure">Failure: {run.failure_reason}</small>
+                        )}
                       </span>
                       <b>
-                        {run.status === 'completed'
+                        {run.kind === 'agent'
+                          ? run.status === 'completed'
+                            ? 'Completed'
+                            : run.status === 'failed'
+                              ? 'Failed'
+                              : 'Running'
+                          : run.status === 'completed'
                           ? 'Completed'
                           : run.status === 'failed'
                           ? 'Failed'
                           : 'Running'}{' '}
-                        <small>{run.created_at}</small>
+                        <small>{run.created_at || run.updated_at}</small>
                       </b>
                     </div>
                   ))
@@ -1779,7 +1754,22 @@ function App() {
                   type="button"
                   aria-label="Toggle Python-only filter"
                   aria-pressed={pythonOnly}
-                  onClick={() => setPythonOnly(!pythonOnly)}
+                  onClick={() => updatePythonOnly(!pythonOnly)}
+                >
+                  <span />
+                </button>
+              </div>
+              <div className="settings-row">
+                <span>
+                  <strong>Notifications</strong>
+                  <small>Discovery results and pull request updates</small>
+                </span>
+                <button
+                  className={`toggle ${notificationsEnabled ? 'toggle-on' : ''}`}
+                  type="button"
+                  aria-label="Toggle notifications"
+                  aria-pressed={notificationsEnabled}
+                  onClick={() => void toggleNotifications()}
                 >
                   <span />
                 </button>
@@ -1805,7 +1795,7 @@ function App() {
               <div className="settings-row">
                 <span>
                   <strong>Coding model</strong>
-                  <small>Local model served through Ollama</small>
+                  <small>Served via {ollamaHealth?.provider ?? 'configured provider'}</small>
                 </span>
                 <span className="setting-value">
                   {ollamaHealth?.configured_model ?? 'qwen3.5:9b'} <ChevronDown size={14} />
@@ -1969,7 +1959,7 @@ function App() {
                 <span>
                   <strong>Ready to implement</strong>
                   <small>
-                    Ollama will read the target files in {selectedFeature.repository} and synthesize
+                    {activeProviderLabel} will read the target files in {selectedFeature.repository} and synthesize
                     clean, tested code rewrites.
                   </small>
                 </span>
@@ -2135,53 +2125,10 @@ function App() {
                   </div>
                 )}
 
-                {/* Isolated Test Sandbox Verification Panel */}
-                <div
-                  style={{
-                    padding: '0.75rem 1rem',
-                    background: 'var(--surface-raised, #f7f7f5)',
-                    borderRadius: '8px',
-                    marginBottom: '0.75rem',
-                    fontSize: '0.82rem',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
-                    <span>
-                      <strong>Regression proof</strong>
-                      <br />
-                      <span style={{ opacity: 0.7 }}>
-                        Generate a focused test and verify it fails before the fix.
-                      </span>
-                    </span>
-                    <button
-                      className="button button-quiet"
-                      type="button"
-                      disabled={regressionTestState[selectedIssue!.id]?.loading}
-                      onClick={() => generateRegressionTest(selectedIssue!)}
-                    >
-                      {regressionTestState[selectedIssue!.id]?.loading ? (
-                        <><Loader size={14} className="spin" /> Generating</>
-                      ) : (
-                        <><FlaskConical size={14} /> Generate test</>
-                      )}
-                    </button>
-                  </div>
-                  {regressionTestState[selectedIssue!.id]?.result && (
-                    <div style={{ marginTop: '0.6rem', color: regressionTestState[selectedIssue!.id]!.result!.fails_before_patch ? '#287a4d' : '#a15c00' }}>
-                      {regressionTestState[selectedIssue!.id]!.result!.fails_before_patch
-                        ? `Confirmed failing before patch: ${regressionTestState[selectedIssue!.id]!.result!.test_path}`
-                        : `The generated test did not fail before patching: ${regressionTestState[selectedIssue!.id]!.result!.test_path}`}
-                    </div>
-                  )}
-                  {regressionTestState[selectedIssue!.id]?.error && (
-                    <div style={{ marginTop: '0.6rem', color: '#c0392b' }}>
-                      {regressionTestState[selectedIssue!.id]!.error}
-                    </div>
-                  )}
-                </div>
                 <SandboxPanel
                   repoFullName={selectedFeature.repository}
                   title={selectedFeature.title}
+                  providerLabel={activeProviderLabel}
                   fileRewrites={selectedFeatureImplement.result.file_rewrites}
                   sandboxState={
                     featureSandboxState[selectedFeature.id] ||
@@ -2231,7 +2178,7 @@ function App() {
                     </>
                   ) : (
                     <>
-                      <Sparkles size={15} /> Implement with Ollama
+                      <Sparkles size={15} /> Implement with {activeProviderLabel}
                     </>
                   )}
                 </button>
@@ -2259,6 +2206,8 @@ function App() {
                     type="button"
                     disabled={
                       featurePrSubmitting[selectedFeature.id] ||
+                      featureSandboxState[selectedFeature.id]?.loading === true ||
+                      featureHealingState[selectedFeature.id]?.loading === true ||
                       Object.keys(selectedFeatureImplement.result.file_rewrites).length === 0
                     }
                     onClick={() =>
@@ -2268,6 +2217,10 @@ function App() {
                     {featurePrSubmitting[selectedFeature.id] ? (
                       <>
                         <Loader size={15} className="spin" /> Creating PR…
+                      </>
+                    ) : featureSandboxState[selectedFeature.id]?.loading || featureHealingState[selectedFeature.id]?.loading ? (
+                      <>
+                        <Loader size={15} className="spin" /> Sandbox running…
                       </>
                     ) : (
                       <>
@@ -2341,197 +2294,33 @@ function App() {
               </div>
             )}
 
-            {/* Analyze section */}
-            {!selectedAnalyze?.result && (
-              <div className="modal-insight">
-                <Sparkles size={16} />
-                <span>
-                  <strong>Ready to analyze</strong>
-                  <small>
-                    Let Ollama read the codebase and propose a fix for this issue.
-                  </small>
-                </span>
-              </div>
-            )}
+            <div className="agent-run-summary" aria-live="polite">
+              {selectedAgentRun ? (
+                <>
+                  <strong>Agent workflow: {selectedAgentRun.status}</strong>
+                  <span>Step: {selectedAgentRun.current_step} · Model requests: {selectedAgentRun.model_requests}</span>
+                  {selectedAgentRun.failure_reason && <span className="agent-run-error">{selectedAgentRun.failure_reason}</span>}
+                </>
+              ) : (
+                <>
+                  <strong>Ready for full agent workflow</strong>
+                  <span>{activeProviderLabel} will plan, test, implement, review, and wait for approval before creating a PR.</span>
+                </>
+              )}
+            </div>
 
-            {selectedAnalyze?.loading && (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem',
-                  padding: '1rem',
-                  fontSize: '0.85rem',
-                  color: 'var(--text-secondary)',
-                }}
-              >
-                <Loader size={16} className="spin" />
-                Cloning repo and running Ollama analysis… this may take a minute.
-              </div>
-            )}
-
-            {selectedAnalyze?.error && (
-              <div
-                style={{
-                  padding: '0.75rem 1rem',
-                  background: '#fdecea',
-                  borderRadius: '8px',
-                  fontSize: '0.82rem',
-                  color: '#c0392b',
-                  marginTop: '0.5rem',
-                }}
-              >
-                {selectedAnalyze.error}
-              </div>
-            )}
-
-            {selectedAnalyze?.result && (
-              <div style={{ marginTop: '0.75rem' }}>
-                {/* Analysis text */}
-                <div
-                  style={{
-                    padding: '0.75rem 1rem',
-                    background: 'var(--surface-raised, #f7f7f5)',
-                    borderRadius: '8px',
-                    fontSize: '0.82rem',
-                    color: 'var(--text-primary)',
-                    whiteSpace: 'pre-wrap',
-                    lineHeight: 1.6,
-                    marginBottom: '0.75rem',
-                  }}
-                >
-                  <strong
-                    style={{
-                      display: 'block',
-                      marginBottom: '0.4rem',
-                      fontSize: '0.75rem',
-                      letterSpacing: '0.04em',
-                      opacity: 0.6,
-                    }}
-                  >
-                    AI ANALYSIS
-                  </strong>
-                  {selectedAnalyze.result.analysis}
-                </div>
-
-                {/* PR title */}
-                <div
-                  style={{
-                    padding: '0.6rem 1rem',
-                    background: '#eef7f2',
-                    borderRadius: '8px',
-                    fontSize: '0.82rem',
-                    marginBottom: '0.75rem',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                  }}
-                >
-                  <GitPullRequest size={14} style={{ flexShrink: 0 }} />
-                  <span>
-                    <strong>PR Title:</strong> {selectedAnalyze.result.pr_title}
-                  </span>
-                </div>
-
-                {/* File rewrites */}
-                {Object.keys(selectedAnalyze.result.file_rewrites).length > 0 && (
-                  <div style={{ marginBottom: '0.75rem' }}>
-                    <div
-                      style={{
-                        fontSize: '0.73rem',
-                        letterSpacing: '0.04em',
-                        opacity: 0.6,
-                        marginBottom: '0.4rem',
-                      }}
-                    >
-                      CHANGED FILES ({Object.keys(selectedAnalyze.result.file_rewrites).length})
-                    </div>
-                    {Object.entries(selectedAnalyze.result.file_rewrites).map(([path, content]) => (
-                      <div
-                        key={path}
-                        style={{
-                          border: '1px solid var(--border, #e8e8e4)',
-                          borderRadius: '8px',
-                          marginBottom: '0.4rem',
-                          overflow: 'hidden',
-                          fontSize: '0.8rem',
-                        }}
-                      >
-                        <button
-                          type="button"
-                          style={{
-                            width: '100%',
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            padding: '0.5rem 0.75rem',
-                            background: '#f0f0ec',
-                            border: 'none',
-                            cursor: 'pointer',
-                            fontFamily: 'monospace',
-                            fontSize: '0.78rem',
-                          }}
-                          onClick={() => setExpandedFile(expandedFile === path ? null : path)}
-                        >
-                          <span>{path}</span>
-                          <ChevronDown
-                            size={13}
-                            style={{
-                              transform: expandedFile === path ? 'rotate(180deg)' : undefined,
-                              transition: 'transform 0.15s',
-                            }}
-                          />
-                        </button>
-                        {expandedFile === path && (
-                          <pre
-                            style={{
-                              margin: 0,
-                              padding: '0.75rem',
-                              background: '#1e1e1e',
-                              color: '#d4d4d4',
-                              fontSize: '0.73rem',
-                              overflowX: 'auto',
-                              maxHeight: '16rem',
-                              overflowY: 'auto',
-                              lineHeight: 1.5,
-                            }}
-                          >
-                            {content}
-                          </pre>
-                        )}
-                      </div>
-                    ))}
+            {selectedAgentRun && (
+              <div className="sandbox-live-console agent-live-console" aria-live="polite">
+                <div className="sandbox-live-console-title">Agent console</div>
+                {selectedAgentSteps.map((step) => (
+                  <div key={step.id}>
+                    $ {step.step_key} [{step.status}]
+                    {step.error ? `: ${step.error}` : ''}
                   </div>
+                ))}
+                {selectedAgentRun.status !== 'completed' && selectedAgentRun.status !== 'failed' && (
+                  <div className="sandbox-console-cursor">$ {selectedAgentRun.current_step} running…</div>
                 )}
-
-                {/* Isolated Test Sandbox Verification Panel */}
-                <SandboxPanel
-                  repoFullName={selectedIssue.repo}
-                  title={selectedIssue.title}
-                  fileRewrites={selectedAnalyze.result.file_rewrites}
-                  sandboxState={
-                    issueSandboxState[selectedIssue.id] ||
-                    (selectedIssue.sandbox_result
-                      ? { loading: false, report: selectedIssue.sandbox_result }
-                      : undefined)
-                  }
-                  healingState={issueHealingState[selectedIssue.id]}
-                  activeSubTab={issueSandboxTab}
-                  setActiveSubTab={setIssueSandboxTab}
-                  onRunSandbox={() =>
-                    runIssueSandbox(
-                      selectedIssue,
-                      selectedAnalyze.result!.file_rewrites,
-                    )
-                  }
-                  onAutoHeal={(report) =>
-                    autoHealIssue(
-                      selectedIssue,
-                      selectedAnalyze.result!.file_rewrites,
-                      report,
-                    )
-                  }
-                />
               </div>
             )}
 
@@ -2544,84 +2333,36 @@ function App() {
                 Back to queue
               </button>
 
-              {!selectedAnalyze?.result ? (
-                <button
-                  className="button button-primary"
-                  type="button"
-                  disabled={selectedAnalyze?.loading}
-                  onClick={() => analyzeIssue(selectedIssue)}
-                >
-                  {selectedAnalyze?.loading ? (
-                    <>
-                      <Loader size={15} className="spin" /> Analyzing…
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles size={15} /> Analyze with Ollama
-                    </>
-                  )}
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={selectedAgentRun?.status === 'starting' || selectedAgentRun?.status === 'planning' || selectedAgentRun?.status === 'executing'}
+                onClick={() => void startAgentWorkflow(selectedIssue)}
+              >
+                {selectedAgentRun?.status === 'starting' || selectedAgentRun?.status === 'planning' || selectedAgentRun?.status === 'executing' ? (
+                  <><Loader size={15} className="spin" /> Running full {activeProviderLabel} workflow…</>
+                ) : (
+                  <><Wand2 size={15} /> Run full agent with {activeProviderLabel}</>
+                )}
+              </button>
+              {selectedAgentRun?.status === 'awaiting_approval' && (
+                <button className="button button-primary" type="button" onClick={() => void approveAgentPR(selectedIssue, selectedAgentRun)}>
+                  <CheckCircle2 size={15} /> Approve PR
                 </button>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  {issueSandboxState[selectedIssue.id]?.report?.overall_status === 'passed' && (
-                    <span
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        fontSize: '0.75rem',
-                        fontWeight: 650,
-                        color: '#15803d',
-                        background: '#dcfce7',
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                      }}
-                    >
-                      <CheckCircle2 size={13} /> 100% Sandbox Verified
-                    </span>
-                  )}
-                  <button
-                    className="button button-secondary"
-                    type="button"
-                    disabled={
-                      reviewState[selectedIssue.id]?.loading ||
-                      Object.keys(selectedAnalyze.result.file_rewrites).length === 0
-                    }
-                    onClick={() => runDiffReview(selectedIssue, selectedAnalyze.result!, issueSandboxState[selectedIssue.id]?.report)}
-                  >
-                    {reviewState[selectedIssue.id]?.loading ? (
-                      <>
-                        <Loader size={15} className="spin" /> Reviewing...
-                      </>
-                    ) : (
-                      <>
-                        🔍 Request AI Review
-                      </>
-                    )}
-                  </button>
-                  <button
-                    className="button button-primary"
-                    type="button"
-                    disabled={
-                      prSubmitting[selectedIssue.id] ||
-                      Object.keys(selectedAnalyze.result.file_rewrites).length === 0
-                    }
-                    onClick={() => submitPR(selectedIssue, selectedAnalyze.result!)}
-                  >
-                    {prSubmitting[selectedIssue.id] ? (
-                      <>
-                        <Loader size={15} className="spin" /> Creating PR…
-                      </>
-                    ) : (
-                      <>
-                        <Plus size={15} /> Create Pull Request
-                      </>
-                    )}
-                  </button>
-                </div>
               )}
             </div>
           </section>
+        </div>
+      )}
+      {toast && (
+        <div className="notification-toast" role="status" aria-live="polite">
+          <div>
+            <strong>{toast.title}</strong>
+            <span>{toast.message}</span>
+          </div>
+          <button type="button" aria-label="Dismiss notification" onClick={() => setToast(null)}>
+            <X size={15} />
+          </button>
         </div>
       )}
     </div>
@@ -2630,329 +2371,6 @@ function App() {
 
 function CpuIcon() {
   return <Code2 size={19} strokeWidth={1.8} />
-}
-
-function SandboxPanel({
-  sandboxState,
-  healingState,
-  activeSubTab,
-  setActiveSubTab,
-  onRunSandbox,
-  onAutoHeal,
-}: {
-  repoFullName?: string
-  title?: string
-  fileRewrites?: Record<string, string>
-  sandboxState?: { loading: boolean; report?: SandboxReport; error?: string }
-  healingState?: { loading: boolean; analysis?: string }
-  activeSubTab: 'tests' | 'linter' | 'types' | 'syntax' | 'logs'
-  setActiveSubTab: (tab: 'tests' | 'linter' | 'types' | 'syntax' | 'logs') => void
-  onRunSandbox: () => void
-  onAutoHeal: (report: SandboxReport) => void
-}) {
-  if (!sandboxState && !healingState) {
-    return (
-      <div
-        style={{
-          marginTop: '0.75rem',
-          padding: '0.75rem 1rem',
-          background: '#f4f8f3',
-          border: '1px dashed #b8d4bb',
-          borderRadius: '7px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '0.75rem',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-          <FlaskConical size={16} style={{ color: '#2b6e3f' }} />
-          <div>
-            <div style={{ fontSize: '0.8rem', fontWeight: 650, color: '#1a4329' }}>
-              Isolated Test Sandbox
-            </div>
-            <div style={{ fontSize: '0.72rem', color: '#52725e' }}>
-              Execute pytest, flake8, and mypy in an isolated workspace before opening PR.
-            </div>
-          </div>
-        </div>
-        <button
-          type="button"
-          className="sandbox-verify-btn"
-          onClick={onRunSandbox}
-        >
-          <Play size={11} /> Run Sandbox Tests
-        </button>
-      </div>
-    )
-  }
-
-  const report = sandboxState?.report
-  const loading = sandboxState?.loading || healingState?.loading
-  const error = sandboxState?.error
-
-  return (
-    <div className="sandbox-container">
-      {/* Header */}
-      <div className="sandbox-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          {loading ? (
-            <span className="sandbox-status-badge sandbox-running">
-              <Loader size={11} className="spin" />
-              {healingState?.loading ? 'Auto-healing code with Ollama…' : 'Running Isolated Pytest & Linters…'}
-            </span>
-          ) : report?.overall_status === 'passed' ? (
-            <span className="sandbox-status-badge sandbox-passed">
-              <CheckCircle2 size={12} /> 100% Tests & Linters Passed
-            </span>
-          ) : report?.overall_status === 'warnings' ? (
-            <span className="sandbox-status-badge sandbox-warnings">
-              <AlertTriangle size={12} /> Tests Passed with Warnings
-            </span>
-          ) : report?.overall_status === 'failed' ? (
-            <span className="sandbox-status-badge sandbox-failed">
-              <XCircle size={12} /> Sandbox Verification Failed
-            </span>
-          ) : error ? (
-            <span className="sandbox-status-badge sandbox-failed">
-              <XCircle size={12} /> Sandbox Error
-            </span>
-          ) : (
-            <span className="sandbox-status-badge sandbox-running">
-              <FlaskConical size={12} /> Ready to verify
-            </span>
-          )}
-
-          {report && (
-            <span className="sandbox-score-pill">
-              Score: {report.score}/100
-            </span>
-          )}
-        </div>
-
-        <div className="sandbox-metrics">
-          {report && <span>⚡ {report.execution_time_seconds}s</span>}
-          <button
-            type="button"
-            className="sandbox-verify-btn"
-            disabled={loading}
-            onClick={onRunSandbox}
-            title="Re-run sandbox test suite"
-          >
-            <RefreshCw size={10} className={loading ? 'spin' : ''} />
-            {report ? 'Re-run Sandbox' : 'Run Sandbox'}
-          </button>
-        </div>
-      </div>
-
-      {/* Auto-Heal Banner on Failure */}
-      {report?.overall_status === 'failed' && !loading && (
-        <div className="sandbox-autoheal-card">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Sparkles size={16} style={{ color: '#7c3aed', flexShrink: 0 }} />
-            <div>
-              <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#4c1d95' }}>
-                Test failures or syntax issues detected
-              </div>
-              <div style={{ fontSize: '0.72rem', color: '#6d28d9' }}>
-                Let Ollama analyze the pytest tracebacks and automatically heal the code.
-              </div>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="sandbox-heal-btn"
-            disabled={healingState?.loading}
-            onClick={() => onAutoHeal(report)}
-          >
-            {healingState?.loading ? (
-              <>
-                <Loader size={12} className="spin" /> Healing…
-              </>
-            ) : (
-              <>
-                <Sparkles size={12} /> ✨ Auto-Heal with Ollama
-              </>
-            )}
-          </button>
-        </div>
-      )}
-
-      {/* Healing analysis result notice */}
-      {healingState?.analysis && !healingState?.loading && (
-        <div className="sandbox-healed-box">
-          <strong>✨ Ollama Healing Analysis:</strong> {healingState.analysis}
-        </div>
-      )}
-
-      {/* Sub-tabs */}
-      {report && (
-        <>
-          <div className="sandbox-tabs">
-            <button
-              type="button"
-              className={`sandbox-tab-btn ${activeSubTab === 'tests' ? 'active' : ''}`}
-              onClick={() => setActiveSubTab('tests')}
-            >
-              🧪 Pytest Suite ({report.checks.tests.passed_count}/{report.checks.tests.tests_run || 0})
-            </button>
-            <button
-              type="button"
-              className={`sandbox-tab-btn ${activeSubTab === 'linter' ? 'active' : ''}`}
-              onClick={() => setActiveSubTab('linter')}
-            >
-              ⚡ Flake8 ({report.checks.linter.warnings_count} warnings)
-            </button>
-            <button
-              type="button"
-              className={`sandbox-tab-btn ${activeSubTab === 'types' ? 'active' : ''}`}
-              onClick={() => setActiveSubTab('types')}
-            >
-              🏷️ Mypy ({report.checks.type_check.errors_count || 0} issues)
-            </button>
-            <button
-              type="button"
-              className={`sandbox-tab-btn ${activeSubTab === 'syntax' ? 'active' : ''}`}
-              onClick={() => setActiveSubTab('syntax')}
-            >
-              📝 Syntax ({report.checks.syntax.errors?.length || 0})
-            </button>
-            <button
-              type="button"
-              className={`sandbox-tab-btn ${activeSubTab === 'logs' ? 'active' : ''}`}
-              onClick={() => setActiveSubTab('logs')}
-            >
-              🖥️ Terminal Log
-            </button>
-          </div>
-
-          <div className="sandbox-body">
-            {/* Pytest tab */}
-            {activeSubTab === 'tests' && (
-              <div>
-                <div className="sandbox-summary-stats">
-                  <div className="sandbox-stat-box">
-                    <div className="sandbox-stat-val" style={{ color: '#166534' }}>
-                      {report.checks.tests.passed_count}
-                    </div>
-                    <div className="sandbox-stat-label">Passed</div>
-                  </div>
-                  <div className="sandbox-stat-box">
-                    <div
-                      className="sandbox-stat-val"
-                      style={{ color: report.checks.tests.failed_count > 0 ? '#b91c1c' : '#374151' }}
-                    >
-                      {report.checks.tests.failed_count}
-                    </div>
-                    <div className="sandbox-stat-label">Failed</div>
-                  </div>
-                  <div className="sandbox-stat-box">
-                    <div
-                      className="sandbox-stat-val"
-                      style={{ color: report.checks.tests.error_count > 0 ? '#b91c1c' : '#374151' }}
-                    >
-                      {report.checks.tests.error_count}
-                    </div>
-                    <div className="sandbox-stat-label">Errors</div>
-                  </div>
-                  <div className="sandbox-stat-box">
-                    <div className="sandbox-stat-val">
-                      {report.checks.tests.duration_seconds}s
-                    </div>
-                    <div className="sandbox-stat-label">Duration</div>
-                  </div>
-                </div>
-
-                {report.checks.tests.failed_count > 0 ? (
-                  <div style={{ marginTop: '0.4rem' }}>
-                    <div style={{ fontWeight: 650, color: '#991b1b', marginBottom: '0.2rem' }}>
-                      Pytest Failure Traceback:
-                    </div>
-                    <div className="sandbox-terminal">{report.checks.tests.output}</div>
-                  </div>
-                ) : (
-                  <div style={{ color: '#15803d', fontWeight: 500, padding: '4px 0' }}>
-                    ✓ {report.checks.tests.summary}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Flake8 Linter tab */}
-            {activeSubTab === 'linter' && (
-              <div>
-                {report.checks.linter.warnings && report.checks.linter.warnings.length > 0 ? (
-                  <table className="sandbox-lint-table">
-                    <thead>
-                      <tr>
-                        <th>File</th>
-                        <th>Line:Col</th>
-                        <th>Violation Description</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {report.checks.linter.warnings.map((w, idx) => (
-                        <tr key={idx}>
-                          <td>{w.file}</td>
-                          <td>{w.line}:{w.col}</td>
-                          <td>{w.message}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <div style={{ color: '#15803d', fontWeight: 500, padding: '4px 0' }}>
-                    ✓ Zero lint violations. Code strictly complies with flake8 standards.
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Mypy Type Checking tab */}
-            {activeSubTab === 'types' && (
-              <div>
-                {report.checks.type_check.errors && report.checks.type_check.errors.length > 0 ? (
-                  <div className="sandbox-terminal">
-                    {report.checks.type_check.errors.join('\n')}
-                  </div>
-                ) : (
-                  <div style={{ color: '#15803d', fontWeight: 500, padding: '4px 0' }}>
-                    ✓ Mypy static type analysis passed without errors.
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Syntax compilation tab */}
-            {activeSubTab === 'syntax' && (
-              <div>
-                {report.checks.syntax.errors && report.checks.syntax.errors.length > 0 ? (
-                  <div className="sandbox-terminal" style={{ color: '#f87171' }}>
-                    {report.checks.syntax.errors.map((e, idx) => (
-                      <div key={idx}>
-                        <strong>{e.file}</strong>: {e.message}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div style={{ color: '#15803d', fontWeight: 500, padding: '4px 0' }}>
-                    ✓ Python bytecode compiled cleanly with py_compile across all modified files.
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Output Logs tab */}
-            {activeSubTab === 'logs' && (
-              <div className="sandbox-terminal">
-                {report.checks.tests.output || 'No output recorded.'}
-              </div>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  )
 }
 
 export default App

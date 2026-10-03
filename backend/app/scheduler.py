@@ -89,6 +89,21 @@ class DiscoveryScheduler:
                             repo_data["full_name"]
                         )
 
+                        open_issue_numbers = await asyncio.to_thread(
+                            self.github_service.get_open_issue_numbers,
+                            repo_data["full_name"],
+                        )
+                        if open_issue_numbers is not None:
+                            stored_issues = await session.execute(
+                                select(IssueModel).where(
+                                    IssueModel.repository == repo_data["full_name"]
+                                )
+                            )
+                            for stored_issue in stored_issues.scalars().all():
+                                if stored_issue.number not in open_issue_numbers:
+                                    stored_issue.is_suitable = False
+                                    stored_issue.agent_status = "stale"
+
                         for issue_data in issues:
                             try:
                                 existing_issue = await session.execute(

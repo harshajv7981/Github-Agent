@@ -10,8 +10,11 @@ Flow:
 import os
 import re
 import asyncio
+import logging
+import shutil
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -19,172 +22,41 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 from github import Github, GithubException
-from ollama import AsyncClient
-from app.model_router import model_for
+from app.llm_client import get_llm_client
+from app.model_router import model_for, provider_name
 
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 REPOS_CACHE_DIR = Path.home() / ".patchwork" / "repos"
+logger = logging.getLogger(__name__)
 MAX_FILE_CHARS = 6000   # chars sent to Ollama per file (keeps context manageable)
 MAX_FILES = 4           # max files sent in one analysis prompt
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-def _run(cmd: list[str], cwd: Optional[Path] = None, check: bool = True) -> str:
-    result = subprocess.run(
-        cmd, cwd=str(cwd) if cwd else None,
-        capture_output=True, text=True
-    )
-    if check and result.returncode != 0:
-        raise RuntimeError(f"Command {' '.join(cmd)} failed:\n{result.stderr}")
-    return result.stdout.strip()
+def _json_options(options: dict) -> dict:
+    if provider_name() == "groq":
+        return {**options, "response_format": {"type": "json_object"}}
+    return options
 
 
-def _clone_or_update(repo_full_name: str) -> Path:
-    """Clone the repo to the local cache dir; pull if already cloned."""
-    owner, name = repo_full_name.split("/")
-    local = REPOS_CACHE_DIR / owner / name
-    local.parent.mkdir(parents=True, exist_ok=True)
-
-    clone_url = f"https://github.com/{repo_full_name}.git"
-    if not (local / ".git").exists():
-        _run(["git", "clone", "--depth", "50", clone_url, str(local)], check=True)
-    else:
-        try:
-            _run(["git", "fetch", "--depth", "50", "origin"], cwd=local)
-            _run(["git", "reset", "--hard", "origin/HEAD"], cwd=local)
-        except Exception:
-            pass  # stale cache is still usable
-
-    return local
+from app.agent_helpers import (
+    MAX_FILES,
+    REPOS_CACHE_DIR,
+    _clean_analysis_text,
+    _cleanup_repo_cache as _cleanup_repo_cache_impl,
+    _clone_or_update,
+    _extract_json_block,
+    _parse_file_rewrites,
+    _read_file,
+    _repo_file_tree,
+    _run,
+    _safe_repo_path,
+)
 
 
-def _repo_file_tree(local: Path, max_files: int = 200) -> str:
-    """Return a compact tree of Python files for Ollama to reason about."""
-    files = sorted(local.rglob("*.py"))
-    files = [f for f in files if ".git" not in f.parts and "venv" not in f.parts
-             and "node_modules" not in f.parts][:max_files]
-    return "\n".join(str(f.relative_to(local)) for f in files)
-
-
-def _read_file(local: Path, rel_path: str) -> str:
-    full = _safe_repo_path(local, rel_path)
-    if full is None:
-        return ""
-    if not full.exists():
-        return ""
-    text = full.read_text(errors="replace")
-    if len(text) > MAX_FILE_CHARS:
-        text = text[:MAX_FILE_CHARS] + f"\n\n[...truncated at {MAX_FILE_CHARS} chars]"
-    return text
-
-
-def _safe_repo_path(root: Path, rel_path: str) -> Path | None:
-    candidate = Path(rel_path.strip())
-    if candidate.is_absolute():
-        return None
-
-    root_resolved = root.resolve()
-    path_resolved = (root_resolved / candidate).resolve()
-    try:
-        path_resolved.relative_to(root_resolved)
-    except ValueError:
-        return None
-    return path_resolved
-
-
-def _extract_json_block(text: str) -> dict | list:
-    """Pull the first JSON object or list out of a free-form Ollama response."""
-    import json
-
-    # Strip thinking / reasoning tags if present
-    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
-    if not cleaned:
-        cleaned = text.strip()
-
-    # 1. Direct parse
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        pass
-
-    # 2. Markdown code blocks ```json ... ``` or ``` ... ```
-    for m in re.finditer(r"```(?:json)?\s*([\s\S]+?)\s*```", cleaned):
-        try:
-            return json.loads(m.group(1).strip())
-        except Exception:
-            pass
-
-    # 3. Precise balanced-brace search for outermost { ... } or [ ... ]
-    for start_char, end_char in [("{", "}"), ("[", "]")]:
-        start_idx = cleaned.find(start_char)
-        if start_idx != -1:
-            depth = 0
-            in_string = False
-            escape = False
-            for i in range(start_idx, len(cleaned)):
-                c = cleaned[i]
-                if escape:
-                    escape = False
-                    continue
-                if c == "\\":
-                    escape = True
-                    continue
-                if c == '"':
-                    in_string = not in_string
-                    continue
-                if not in_string:
-                    if c == start_char:
-                        depth += 1
-                    elif c == end_char:
-                        depth -= 1
-                        if depth == 0:
-                            candidate = cleaned[start_idx : i + 1]
-                            try:
-                                return json.loads(candidate)
-                            except Exception:
-                                pass
-                            break
-
-    # 4. Fallback search
-    match = re.search(r"\{[\s\S]+\}", cleaned)
-    if match:
-        raw_obj = match.group()
-        for end_idx in range(len(raw_obj), 0, -1):
-            if raw_obj[end_idx - 1] == "}":
-                try:
-                    return json.loads(raw_obj[:end_idx])
-                except Exception:
-                    continue
-
-    return {}
-
-
-def _parse_file_rewrites(text: str) -> dict[str, str]:
-    """
-    Parse Ollama response for file rewrites.
-    Expects sections like:
-      === FILE: path/to/file.py ===
-      <new content>
-      === END FILE ===
-    """
-    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
-    target_text = cleaned if cleaned else text
-    rewrites: dict[str, str] = {}
-    blocks = re.findall(
-        r"=== FILE:\s*(.+?)\s*===\n([\s\S]+?)=== END FILE ===",
-        target_text, re.IGNORECASE
-    )
-    for path, content in blocks:
-        rewrites[path.strip()] = content.strip("\n")
-    return rewrites
-
+def _cleanup_repo_cache(repo_full_name: str) -> None:
+    _cleanup_repo_cache_impl(repo_full_name, REPOS_CACHE_DIR)
 
 # ---------------------------------------------------------------------------
 # public API
@@ -196,12 +68,13 @@ async def generate_acceptance_criteria(
     issue_number: int,
     issue_title: str,
     issue_body: str,
+    repository_memory: str = "",
 ) -> dict:
     """
     Convert a GitHub issue into explicit, testable acceptance criteria,
     and flag if the issue is too ambiguous.
     """
-    client = AsyncClient(host=OLLAMA_HOST)
+    client = get_llm_client()
     
     prompt = textwrap.dedent(f"""
         You are a principal engineer. Convert this GitHub issue into explicit, testable acceptance criteria before code is written.
@@ -209,6 +82,9 @@ async def generate_acceptance_criteria(
         Repository: {repo_full_name}
         Issue #{issue_number}: {issue_title}
         Description: {(issue_body or '(no description)')[:1500]}
+
+        Repository memory from prior contribution work:
+        {repository_memory or '(none)'}
 
         Instructions:
         1. Extract the core requirements and expected behavior.
@@ -231,7 +107,7 @@ async def generate_acceptance_criteria(
         model=model_for("triage"),
         prompt=prompt,
         think=False,
-        options={"temperature": 0.1, "num_predict": 1024},
+        options=_json_options({"temperature": 0.1, "num_predict": 1024}),
     )
     
     return _extract_json_block(resp.response)
@@ -242,6 +118,7 @@ async def analyze_issue(
     issue_number: int,
     issue_title: str,
     issue_body: str,
+    repository_memory: str = "",
 ) -> dict:
     """
     Clone the repo, ask Ollama which files are relevant, read them,
@@ -258,30 +135,58 @@ async def analyze_issue(
             "relevant_files": [str],
         }
     """
-    client = AsyncClient(host=OLLAMA_HOST)
+    client = get_llm_client()
+    logger.info(
+        "Issue analysis started repo=%s issue=%s provider=%s",
+        repo_full_name,
+        issue_number,
+        os.getenv("LLM_PROVIDER", "ollama"),
+    )
 
     # 1. Clone / update the repo
+    stage_started = time.perf_counter()
+    logger.info("Issue analysis cloning repository repo=%s issue=%s", repo_full_name, issue_number)
     local = await asyncio.to_thread(_clone_or_update, repo_full_name)
     file_tree = await asyncio.to_thread(_repo_file_tree, local)
+    logger.info(
+        "Issue analysis repository ready repo=%s issue=%s python_files=%d duration_seconds=%.2f",
+        repo_full_name,
+        issue_number,
+        len(file_tree.splitlines()) if file_tree else 0,
+        time.perf_counter() - stage_started,
+    )
 
 
     # 1.5. Convert Issue to Acceptance Criteria
-    ac_data = await generate_acceptance_criteria(repo_full_name, issue_number, issue_title, issue_body)
+    stage_started = time.perf_counter()
+    logger.info("Issue analysis generating acceptance criteria repo=%s issue=%s", repo_full_name, issue_number)
+    ac_data = await generate_acceptance_criteria(
+        repo_full_name, issue_number, issue_title, issue_body, repository_memory
+    )
     acceptance_criteria = ac_data.get("criteria", [])
     ac_text = "- " + "\n- ".join(acceptance_criteria) if acceptance_criteria else "(None generated)"
+    logger.info(
+        "Issue analysis acceptance criteria ready repo=%s issue=%s count=%d duration_seconds=%.2f",
+        repo_full_name,
+        issue_number,
+        len(acceptance_criteria),
+        time.perf_counter() - stage_started,
+    )
 
     # 2. Ask Ollama which files are relevant
     file_selection_prompt = textwrap.dedent(f"""
         You are an expert software engineer reviewing a GitHub issue.
 
         Repository: {repo_full_name}
-        Issue #{issue_number}: {issue_title}
 
         Issue description:
         {(issue_body or '(no description)')[:1500]}
 
         Acceptance Criteria:
         {ac_text}
+
+        Repository memory from prior contribution work:
+        {repository_memory or '(none)'}
 
         Here are the Python files in the repository:
         {file_tree}
@@ -296,14 +201,23 @@ async def analyze_issue(
         Do NOT include __init__.py unless there's a strong reason.
     """).strip()
 
+    stage_started = time.perf_counter()
+    logger.info("Issue analysis selecting relevant files repo=%s issue=%s", repo_full_name, issue_number)
     selection_resp = await client.generate(
         model=model_for("triage"),
         prompt=file_selection_prompt,
         think=False,
-        options={"temperature": 0.1, "num_predict": 512},
+        options=_json_options({"temperature": 0.1, "num_predict": 512}),
     )
     selection_data = _extract_json_block(selection_resp.response)
     relevant_files: list[str] = selection_data.get("files", [])[:MAX_FILES]
+    logger.info(
+        "Issue analysis file selection complete repo=%s issue=%s selected_files=%d duration_seconds=%.2f",
+        repo_full_name,
+        issue_number,
+        len(relevant_files),
+        time.perf_counter() - stage_started,
+    )
 
     # 3. Read the relevant files
     file_contents: dict[str, str] = {}
@@ -315,6 +229,12 @@ async def analyze_issue(
     if not file_contents:
         # fall back: just use the file tree as context
         file_contents = {"(no specific file selected)": file_tree[:3000]}
+    logger.info(
+        "Issue analysis context ready repo=%s issue=%s files_read=%d",
+        repo_full_name,
+        issue_number,
+        len(file_contents),
+    )
 
     files_block = "\n\n".join(
         f"### {path}\n```python\n{content}\n```"
@@ -333,6 +253,9 @@ async def analyze_issue(
 
         Acceptance Criteria:
         {ac_text}
+
+        Repository memory from prior contribution work:
+        {repository_memory or '(none)'}
 
         Relevant source files:
         {files_block}
@@ -361,6 +284,8 @@ async def analyze_issue(
         - Suggested PR title (one line, prefixed "PR TITLE:")
     """).strip()
 
+    stage_started = time.perf_counter()
+    logger.info("Issue analysis generating proposed fix repo=%s issue=%s", repo_full_name, issue_number)
     fix_resp = await client.generate(
         model=model_for("coding"),
         prompt=fix_prompt,
@@ -369,15 +294,29 @@ async def analyze_issue(
         options={"temperature": 0.2, "num_predict": 4096},
     )
     raw = fix_resp.response
+    logger.info(
+        "Issue analysis proposed fix received repo=%s issue=%s response_chars=%d duration_seconds=%.2f",
+        repo_full_name,
+        issue_number,
+        len(raw),
+        time.perf_counter() - stage_started,
+    )
 
     # 5. Parse response
     file_rewrites = _parse_file_rewrites(raw)
+    logger.info(
+        "Issue analysis completed repo=%s issue=%s rewritten_files=%d relevant_files=%d",
+        repo_full_name,
+        issue_number,
+        len(file_rewrites),
+        len(file_contents),
+    )
 
     cleaned_raw = re.sub(r"<think>[\s\S]*?</think>", "", raw, flags=re.IGNORECASE).strip()
 
     # Extract ANALYSIS section
     analysis_match = re.search(r"ANALYSIS:([\s\S]+?)(?:PR TITLE:|$)", cleaned_raw or raw, re.IGNORECASE)
-    analysis_text = analysis_match.group(1).strip() if analysis_match else (cleaned_raw or raw)[-1500:]
+    analysis_text = _clean_analysis_text(raw, analysis_match)
 
     pr_title_match = re.search(r"PR TITLE:\s*(.+)", raw, re.IGNORECASE)
     pr_title = pr_title_match.group(1).strip() if pr_title_match else f"Fix: {issue_title}"
@@ -414,9 +353,10 @@ async def generate_regression_test(
     issue_number: int,
     issue_title: str,
     issue_body: str,
+    feedback: str = "",
 ) -> dict:
     """Generate one focused regression test and return it for pre-patch validation."""
-    client = AsyncClient(host=OLLAMA_HOST)
+    client = get_llm_client()
     local = await asyncio.to_thread(_clone_or_update, repo_full_name)
     file_tree = await asyncio.to_thread(_repo_file_tree, local)
 
@@ -427,12 +367,17 @@ async def generate_regression_test(
         Issue #{issue_number}: {issue_title}
         Description: {(issue_body or '(no description)')[:1800]}
 
+        Feedback from a previous generated test attempt:
+        {feedback or '(none; first attempt)'}
+
         Python source files:
         {file_tree}
 
         Write exactly one focused pytest test that expresses the missing behavior.
         The test must fail against the current repository if the issue is real and
         pass after a correct implementation. Do not test unrelated behavior.
+        If the previous attempt passed on the current repository, choose a different
+        public behavior or fixture that directly exercises the issue.
         Use only the repository's existing public APIs and standard pytest features.
         Return ONLY JSON in this format:
         {{
@@ -446,7 +391,7 @@ async def generate_regression_test(
         model=model_for("review"),
         prompt=prompt,
         think=False,
-        options={"temperature": 0.1, "num_predict": 3072},
+        options=_json_options({"temperature": 0.1, "num_predict": 3072}),
     )
     data = _extract_json_block(response.response)
     if not isinstance(data, dict):
@@ -481,7 +426,7 @@ async def review_patch(
     Assess whether the generated fix satisfies acceptance criteria, is safe, and
     follows Ponytail guidelines.
     """
-    client = AsyncClient(host=OLLAMA_HOST)
+    client = get_llm_client()
 
     ac_text = "- " + "\n- ".join(acceptance_criteria) if acceptance_criteria else "(No Acceptance Criteria provided)"
     
@@ -510,6 +455,9 @@ async def review_patch(
         Sandbox Test Results (Linters & Pytest):
         {sandbox_text}
 
+        Repository memory from prior contribution work:
+        {repository_memory or '(none)'}
+
         Instructions:
         1. Check correctness: Does the patch actually solve the issue?
         2. Check against Acceptance Criteria: Are ALL criteria satisfied?
@@ -536,7 +484,7 @@ async def review_patch(
         model=model_for("coding"),
         prompt=prompt,
         think=False,
-        options={"temperature": 0.1, "num_predict": 2048},
+        options=_json_options({"temperature": 0.1, "num_predict": 2048}),
     )
 
     data = _extract_json_block(resp.response)
@@ -574,19 +522,28 @@ async def create_pull_request(
 
     from app.github_service import GitHubService
     gh_svc = GitHubService(GITHUB_TOKEN)
-    preflight = gh_svc.run_pr_preflight(repo_full_name, branch, issue_number)
+    logger.info("PR creation preflight started repo=%s issue=%s", repo_full_name, issue_number)
+    preflight = await asyncio.to_thread(
+        gh_svc.run_pr_preflight, repo_full_name, branch, issue_number
+    )
     if not preflight["ok"]:
         raise RuntimeError(
             f"PR pre-flight blocked: {'; '.join(preflight['blockers'])}"
         )
 
-    gh = Github(GITHUB_TOKEN)
-    user = gh.get_user()
-    upstream = gh.get_repo(repo_full_name)
+    logger.info("PR creation GitHub setup started repo=%s", repo_full_name)
+    gh = Github(GITHUB_TOKEN, timeout=30)
+    user, upstream = await asyncio.gather(
+        asyncio.to_thread(gh.get_user),
+        asyncio.to_thread(gh.get_repo, repo_full_name),
+    )
 
     fork = await asyncio.to_thread(_get_or_create_fork, user, upstream)
+    logger.info("PR creation fork ready repo=%s fork=%s", repo_full_name, fork.full_name)
 
+    logger.info("PR creation clone started repo=%s", repo_full_name)
     local = await asyncio.to_thread(_clone_or_update, repo_full_name)
+    logger.info("PR creation clone ready repo=%s", repo_full_name)
     fork_remote_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{fork.full_name}.git"
 
     try:
@@ -614,12 +571,16 @@ async def create_pull_request(
     commit_msg = f"{pr_title}\n\nFixes #{issue_number} in {repo_full_name}\n\nGenerated by Patchwork"
     _run(["git", "commit", "-m", commit_msg], cwd=local)
 
+    logger.info("PR creation pushing branch repo=%s branch=%s", repo_full_name, branch)
     _run(["git", "push", "fork", branch, "--force"], cwd=local)
 
     pr = await asyncio.to_thread(
         _open_github_pr,
         upstream, fork, branch, default_branch, pr_title, pr_body
     )
+    logger.info("PR creation completed repo=%s pr=%s", repo_full_name, pr.number)
+
+    _cleanup_repo_cache(repo_full_name)
 
     return {
         "pr_url": pr.html_url,
@@ -637,7 +598,6 @@ def _get_or_create_fork(user, upstream):
             raise RuntimeError(
                 "GitHub authenticated successfully, but this token cannot access "
                 f"the fork account or repository ({error.status}). Use a classic "
-                "PAT with the repo scope, or authorize a fine-grained token for "
                 "the upstream repository and fork creation, then retry."
             ) from error
 
@@ -670,317 +630,3 @@ def _open_github_pr(upstream, fork, branch, base_branch, pr_title, pr_body):
             for pr in upstream.get_pulls(state="open", head=head):
                 return pr
         raise
-
-
-async def suggest_features_for_repo(
-    repo_full_name: str,
-    repo_description: str = "",
-) -> list[dict]:
-    """
-    Clone repo, read README/config and file tree, ask Ollama to suggest 3-5 concrete feature proposals.
-    """
-    client = AsyncClient(host=OLLAMA_HOST)
-    local = await asyncio.to_thread(_clone_or_update, repo_full_name)
-    file_tree = await asyncio.to_thread(_repo_file_tree, local)
-
-    # Read README if present
-    readme_text = ""
-    for rname in ["README.md", "README.rst", "README.txt", "readme.md"]:
-        rpath = local / rname
-        if rpath.exists():
-            readme_text = rpath.read_text(errors="replace")[:3000]
-            break
-
-    # Read config if present
-    config_text = ""
-    for cname in ["pyproject.toml", "setup.py", "requirements.txt"]:
-        cpath = local / cname
-        if cpath.exists():
-            config_text += f"\n--- {cname} ---\n" + cpath.read_text(errors="replace")[:1500]
-
-    prompt = textwrap.dedent(f"""
-        You are a principal software engineer and open-source maintainer analyzing a repository for high-value feature improvements.
-
-        Repository: {repo_full_name}
-        Description: {repo_description or '(No description provided)'}
-
-        Project README:
-        {readme_text or '(No README found)'}
-
-        Configuration files:
-        {config_text or '(No configuration files found)'}
-
-        Python source tree:
-        {file_tree}
-
-        Instructions:
-        Suggest exactly 3 to 5 realistic, high-impact feature additions, optimizations, or architectural enhancements suitable for an open-source pull request.
-        Ponytail "Lazy Senior Dev" Guidelines:
-        - Suggest pragmatic, focused enhancements rather than grandiose rewrites.
-        - The best code is the code never written. Suggest deletions of dead code, consolidations of duplicate logic, or using standard libraries to remove dependencies.
-        - Focus on root causes of technical debt.
-        
-        Cover different areas:
-        - New feature or capability (e.g., CLI commands, format exporters, async support)
-        - Performance / Memory optimization
-        - Type safety, modern Python typing, or schema validation
-        - Developer tooling, testing coverage, or logging/observability
-
-        Respond with ONLY a JSON object containing a "suggestions" list formatted like:
-        {{
-            "suggestions": [
-                {{
-                    "title": "Add JSON Lines streaming output for export commands",
-                    "category": "feature",
-                    "complexity": "intermediate",
-                    "impact_score": 85,
-                    "description": "Currently exports only support in-memory CSV/JSON which exhausts memory on large datasets. Adding JSONL streaming enables handling arbitrarily large outputs with constant memory usage.",
-                    "implementation_plan": "1. Add jsonlines dependency or use builtin json streaming\\n2. Extend export CLI with --format=jsonl\\n3. Add generator-based stream writer in utils/export.py\\n4. Add unit test for chunked writing",
-                    "suggested_files": ["src/export.py", "src/cli.py"]
-                }}
-            ]
-        }}
-
-        Valid categories: "feature", "optimization", "type_safety", "tooling", "testing", "documentation"
-        Valid complexity: "easy", "intermediate", "advanced"
-        impact_score: Integer between 50 and 95
-    """).strip()
-
-    resp = await client.generate(
-        model=model_for("triage"),
-        prompt=prompt,
-        think=False,
-        system="You are an open-source technical architect. Respond ONLY with a valid JSON object containing the 'suggestions' list. Do not include thinking or preamble.",
-        options={"temperature": 0.2, "num_predict": 3072},
-    )
-
-    data = _extract_json_block(resp.response)
-    if isinstance(data, dict):
-        suggestions = data.get("suggestions", [])
-        if not isinstance(suggestions, list):
-            suggestions = []
-    elif isinstance(data, list):
-        suggestions = data
-    else:
-        suggestions = []
-
-    clean_suggestions = []
-    for s in suggestions:
-        if isinstance(s, dict) and s.get("title") and s.get("description"):
-            clean_suggestions.append({
-                "title": str(s.get("title", "")).strip(),
-                "category": str(s.get("category", "feature")).lower(),
-                "complexity": str(s.get("complexity", "intermediate")).lower(),
-                "impact_score": max(50, min(100, int(s.get("impact_score", 75)))),
-                "description": str(s.get("description", "")).strip(),
-                "implementation_plan": str(s.get("implementation_plan", "")).strip(),
-                "suggested_files": [str(f) for f in s.get("suggested_files", []) if isinstance(f, str)],
-            })
-
-    return clean_suggestions
-
-
-async def implement_feature(
-    repo_full_name: str,
-    feature_title: str,
-    feature_description: str,
-    implementation_plan: str,
-    suggested_files: list[str],
-) -> dict:
-    """
-    Clone repo, read relevant files, prompt Ollama to generate complete code rewrites for the feature.
-    """
-    client = AsyncClient(host=OLLAMA_HOST)
-    local = await asyncio.to_thread(_clone_or_update, repo_full_name)
-    file_tree = await asyncio.to_thread(_repo_file_tree, local)
-
-    if not suggested_files:
-        selection_prompt = textwrap.dedent(f"""
-            Repository: {repo_full_name}
-            Feature to implement: {feature_title}
-            Description: {feature_description}
-            Plan: {implementation_plan}
-
-            Python files in repository:
-            {file_tree}
-
-            List up to {MAX_FILES} file paths that need to be created or modified.
-            Respond with ONLY JSON: {{"files": ["path/to/file.py"]}}
-        """).strip()
-
-        sel_resp = await client.generate(
-            model=model_for("triage"),
-            prompt=selection_prompt,
-            think=False,
-            options={"temperature": 0.1, "num_predict": 512},
-        )
-        sel_data = _extract_json_block(sel_resp.response)
-        suggested_files = sel_data.get("files", [])[:MAX_FILES]
-
-    file_contents: dict[str, str] = {}
-    for rel_path in suggested_files:
-        content = await asyncio.to_thread(_read_file, local, rel_path)
-        if content:
-            file_contents[rel_path] = content
-        else:
-            file_contents[rel_path] = "# (New file to be created)"
-
-    files_block = "\n\n".join(
-        f"### {path}\n```python\n{content}\n```"
-        for path, content in file_contents.items()
-    )
-
-    impl_prompt = textwrap.dedent(f"""
-        You are a senior open-source contributor implementing a new feature or improvement.
-
-        Repository: {repo_full_name}
-        Feature: {feature_title}
-        Description: {feature_description}
-        Plan: {implementation_plan}
-
-        Target source files:
-        {files_block}
-
-        Instructions:
-        - Implement the complete, working code for this feature.
-        - Match the existing codebase architecture, idioms, and code style.
-        - For every file you create or modify, output the COMPLETE file content (not a partial diff).
-
-        Ponytail "Lazy Senior Dev" Guidelines:
-        - YAGNI (You Aren't Gonna Need It): Do not build things unless explicitly required.
-        - Reuse existing codebase helpers, utils, and standard library features before writing new code.
-        - Delete over addition. Ensure the shortest, simplest working diff.
-        - No unrequested boilerplate or premature abstractions.
-        - Fix root causes (shared functions), not just symptoms (call locations).
-        - Maintain strict security, error handling, and trust boundary validations (do not be lazy about correctness).
-        - Format each file EXACTLY like:
-
-        === FILE: path/to/file.py ===
-        <complete file content here>
-        === END FILE ===
-
-        After all file blocks, write an ANALYSIS section:
-        ANALYSIS:
-        - Architectural summary of what was added/changed (2-3 sentences)
-        - How to test and verify the feature (2-3 bullet points)
-        PR TITLE: {feature_title}
-    """).strip()
-
-    impl_resp = await client.generate(
-        model=model_for("coding"),
-        prompt=impl_prompt,
-        think=False,
-        system="You are an expert open-source maintainer implementing a feature. Output full file rewrites in === FILE: ... === format, followed by ANALYSIS and PR TITLE. Do not include thinking tokens.",
-        options={"temperature": 0.2, "num_predict": 4096},
-    )
-    raw = impl_resp.response
-
-    file_rewrites = _parse_file_rewrites(raw)
-    cleaned_raw = re.sub(r"<think>[\s\S]*?</think>", "", raw, flags=re.IGNORECASE).strip()
-    analysis_match = re.search(r"ANALYSIS:([\s\S]+?)(?:PR TITLE:|$)", cleaned_raw or raw, re.IGNORECASE)
-    analysis_text = analysis_match.group(1).strip() if analysis_match else (cleaned_raw or raw)[-1500:]
-
-    pr_title_match = re.search(r"PR TITLE:\s*(.+)", raw, re.IGNORECASE)
-    pr_title = pr_title_match.group(1).strip() if pr_title_match else f"Feat: {feature_title}"
-    pr_title = pr_title.strip('"\'')
-
-    pr_body = textwrap.dedent(f"""
-        ## Feature: {feature_title}
-
-        ### Motivation & Overview
-        {feature_description}
-
-        ### Implementation Details
-        {analysis_text}
-
-        ### Verification
-        - Review modified & added files
-        - Run test suite
-
-        ---
-        *Generated by [Patchwork](https://github.com) — AI open-source contribution agent*
-    """).strip()
-
-    return {
-        "analysis": analysis_text,
-        "file_rewrites": file_rewrites,
-        "pr_title": pr_title,
-        "pr_body": pr_body,
-        "relevant_files": list(file_rewrites.keys()) or suggested_files,
-    }
-
-
-async def create_feature_pull_request(
-    repo_full_name: str,
-    feature_id: int,
-    pr_title: str,
-    pr_body: str,
-    file_rewrites: dict[str, str],
-) -> dict:
-    """
-    Apply file rewrites for a feature in a fork and open a PR.
-    Runs pre-flight checks for duplicates and contribution policy.
-
-    Returns:
-        {"pr_url": str, "pr_number": int, "branch": str, "preflight": dict}
-    """
-    if not GITHUB_TOKEN:
-        raise RuntimeError("GITHUB_TOKEN is not set — cannot create PR")
-
-    branch = f"patchwork/feature-{feature_id}"
-
-    from app.github_service import GitHubService
-    gh_svc = GitHubService(GITHUB_TOKEN)
-    preflight = gh_svc.run_pr_preflight(repo_full_name, branch)
-    if not preflight["ok"]:
-        raise RuntimeError(
-            f"PR pre-flight blocked: {'; '.join(preflight['blockers'])}"
-        )
-
-    gh = Github(GITHUB_TOKEN)
-    user = gh.get_user()
-    upstream = gh.get_repo(repo_full_name)
-
-    fork = await asyncio.to_thread(_get_or_create_fork, user, upstream)
-
-    local = await asyncio.to_thread(_clone_or_update, repo_full_name)
-    fork_remote_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{fork.full_name}.git"
-
-    try:
-        _run(["git", "remote", "remove", "fork"], cwd=local, check=False)
-    except Exception:
-        pass
-    _run(["git", "remote", "add", "fork", fork_remote_url], cwd=local)
-
-    _run(["git", "fetch", "origin"], cwd=local)
-    default_branch = upstream.default_branch
-    _run(["git", "checkout", "-B", branch, f"origin/{default_branch}"], cwd=local)
-
-    for rel_path, content in file_rewrites.items():
-        full_path = _safe_repo_path(local, rel_path)
-        if full_path is None:
-            raise ValueError(f"Invalid rewrite path: {rel_path}")
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_text(content)
-
-    modified = _run(["git", "status", "--short"], cwd=local)
-    if not modified.strip():
-        raise RuntimeError("No files were changed — feature patch produced no diff")
-
-    _run(["git", "add", "-A"], cwd=local)
-    commit_msg = f"{pr_title}\n\nFeature for {repo_full_name}\n\nGenerated by Patchwork"
-    _run(["git", "commit", "-m", commit_msg], cwd=local)
-
-    _run(["git", "push", "fork", branch, "--force"], cwd=local)
-
-    pr = await asyncio.to_thread(
-        _open_github_pr,
-        upstream, fork, branch, default_branch, pr_title, pr_body
-    )
-
-    return {
-        "pr_url": pr.html_url,
-        "pr_number": pr.number,
-        "branch": branch,
-        "preflight": preflight,
-    }

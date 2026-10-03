@@ -1,0 +1,136 @@
+@media (max-width: 390px) {
+  .nav-item { padding-right: 7px; padding-left: 7px; }
+  .nav-item > span:nth-of-type(1) { font-size: 9px; }
+  .metric-card { padding-right: 8px; padding-left: 8px; }
+  .metric-foot { font-size: 7px; }
+  .metric-highlight,
+  .metric-up { font-size: 7px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+/* Telemetry Metrics Grid */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1.5rem;
+  padding: 1.5rem;
+}
+
+.stat-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  transition: transform 0.2s, border-color 0.2s;
+}
+
+.stat-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.stat-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stat-value {
+  font-size: 2.25rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.stat-desc {
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+}
+
+.ac-block {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  border-left: 3px solid var(--accent);
+}
+
+.ac-block h4 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.ac-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.ac-list li {
+  margin-bottom: 0.25rem;
+}
+
+/* AI Review Block */
+.review-block {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+  border: 1px solid var(--border-color);
+  border-left: 4px solid var(--text-tertiary);
+}
+
+.review-block.decision-pass { border-left-color: #2ea043; }
+.review-block.decision-needs_revision { border-left-color: #d29922; }
+.review-block.decision-blocked { border-left-color: #f85149; }
+
+.review-block h4 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1rem;
+}
+
+.review-findings {
+  margin-top: 0.75rem;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+}
+
+.review-findings li { margin-bottom: 0.5rem; }
+.finding-severity-high { color: #f85149; }
+.finding-severity-medium { color: #d29922; }
+.finding-severity-low { color: var(--text-secondary); }
+
+.suggested-fix {
+  margin-top: 0.25rem;
+  font-family: monospace;
+  background: rgba(0,0,0,0.1);
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  color: var(--text-primary);
+}
+
+/* Custom scrollbar for modals */
+.issue-modal::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.issue-modal::-webkit-scrollbar-track {
+  background: transparent;
+}
+.issue-modal::-webkit-scrollbar-thumb {
+  background: #c3c9c0;
+  border-radius: 10px;
+}
+.issue-modal::-webkit-scrollbar-thumb:hover {
+  background: #929b91;
+}
